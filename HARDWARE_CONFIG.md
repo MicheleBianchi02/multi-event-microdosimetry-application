@@ -268,6 +268,25 @@ the folder; conversely, the editor's **"Save as Component…"** writes the
 selected device or circuit as a new fragment (device fragments are saved
 without the serial connection, which is machine-specific).
 
+Shipped components:
+
+| Fragment | Provides |
+|---|---|
+| `device_pico2.json` | Raspberry Pi Pico 2 — timing, gain (3 pins), acquisition (1 channel, 12 bit, 0…5 V), ramp sampling. |
+| `device_pic.json` | PIC — timing (no ramp sampling), gain (1 pin), acquisition (2 channels, 12 bit, 0…5 V). |
+| `device_dummy_acquisition.json` | Virtual acquisition (`dummy_v1`): bench tests only, no data. |
+| `circuit_board_rev_b_ch1.json` | Integrator board rev. B: 22 pF fixed + 100/560/3300 pF switchable. |
+| `circuit_board_rev_b_ch2.json` | Integrator board rev. B: 100 pF switchable, no fixed. |
+
+A fragment declares the capability blocks its device uses in the setup, and
+a role can only be assigned to devices declaring the matching block (§2.4).
+The shipped fragments declare **all** capabilities their driver supports; a
+hand-made fragment may declare fewer (e.g. a Pico used only for timing).
+To extend an existing configuration with a capability, add the block to the
+device entry by editing the workspace JSON directly — the declared values
+must lie within the driver's limits, and the app validates them on the next
+load.
+
 ---
 
 ## 4. The editor

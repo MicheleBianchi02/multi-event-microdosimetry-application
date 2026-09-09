@@ -1,0 +1,30 @@
+{
+    "kind": "device",
+    "suggested_id": "pic_1",
+    "label": "PIC (timing + gain + acquisition, 1 GPIO, no ramp)",
+    "data": {
+        "name": "PIC",
+        "driver": "pic_serial_v1",
+        "connection": {"type": "serial", "port": "", "baud_rate": 115200},
+        "note": "Single GPIO: one switchable capacitor per circuit. Firmware cannot generate ramp triggers.",
+        "capabilities": {
+            "timing": {
+                "integration_time_us": {"min": 1, "max": 512000000, "step": 1},
+                "reset_time_us": {"min": 1, "max": 512000000, "step": 1},
+                "period_us": null,
+                "ramp_sampling": {
+                    "supported": false
+                }
+            },
+            "gain": {"pins": [2]},
+            "acquisition": {
+                "num_channels": 2,
+                "adc": {
+                    "bits": 12,
+                    "input_ranges_volts": [{"min_volts": 0.0, "max_volts": 5.0}],
+                    "supports_oversampling": false
+                }
+            }
+        }
+    }
+}

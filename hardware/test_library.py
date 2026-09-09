@@ -26,7 +26,7 @@ def test_all_shipped_fragments_are_valid():
         ("circuit", "board_ch1"),
         ("circuit", "board_ch2"),
         ("device", "dummy_acq"),
-        ("device", "pic_gain"),
+        ("device", "pic_1"),
         ("device", "pico_1"),
     ]
 
