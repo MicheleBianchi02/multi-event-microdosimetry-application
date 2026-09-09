@@ -3,6 +3,8 @@ import zipfile
 import os
 import shutil
 from datetime import datetime
+
+from core.constants import APP_VERSION
 import logging
 
 logger = logging.getLogger(__name__)
@@ -64,7 +66,7 @@ class DataExporter:
         settings = {
             "file_format_version": "3.0",
             "versions": {
-                "app_version": getattr(session_model, 'app_version', "v2.2.0"),
+                "app_version": getattr(session_model, 'app_version', APP_VERSION),
             },
             "measurement_info": {
                 "timestamp_start": t_start,

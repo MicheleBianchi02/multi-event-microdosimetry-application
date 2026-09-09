@@ -181,11 +181,15 @@ Severity scale:
   in the hardware config (3 for the Pico, 1 for the PIC), validated against the
   driver's `GAIN_MAX_PINS` at config load.
 
-### B11 — Version/name strings inconsistent
-- Intended app identity: **ATOMIQA 3.0**. Currently `APP_VERSION = "v2.2.0"`
-  (`core/constants.py:3`, shown in the window title and written into
-  `settings.json`), `pyproject.toml` says `ATOMIQA 1.5`, and the PyInstaller bundle
-  is named `MicroDosimeter` (`build.py`).
+### B11 — Version/name strings inconsistent — **FIXED**
+- Intended app identity: **ATOMIQA 3.0**. `APP_VERSION = "v2.2.0"`
+  (`core/constants.py`), `pyproject.toml` said `ATOMIQA 1.5`, and the PyInstaller bundle
+  was named `MicroDosimeter` (`build.py`).
+- **Fixed (2026-09-09):** single source `APP_VERSION = "3.0"` in
+  `core/constants.py` (window title, session default, setup.json and
+  settings.json); `pyproject.toml` at 3.0; PyInstaller bundle named
+  `ATOMIQA`. Archives keep the version that recorded them (older ones
+  legitimately show earlier versions).
 
 ### B12 — Default capacitor base values disagree with the shipped config — **FIXED**
 - `SessionModel`/`ShiftService` default to `[22, 100, 560, 3000]` pF

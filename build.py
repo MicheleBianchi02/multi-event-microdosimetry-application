@@ -4,7 +4,7 @@ import sys
 
 
 def main():
-    print(f"Building MicroDosimeter for {platform.system()}...")
+    print(f"Building ATOMIQA for {platform.system()}...")
 
     # PyInstaller uses ';' as a separator for --add-data on Windows, and ':' on Unix-like systems
     data_separator = ";" if platform.system() == "Windows" else ":"
@@ -21,7 +21,7 @@ def main():
         "--onedir",
         "--windowed",
         "--icon=app_icon.ico",
-        "--name=MicroDosimeter",
+        "--name=ATOMIQA",
         "--collect-all=PyQt6",
         "--collect-all=numpy",
         "--collect-all=pyqtgraph",
@@ -38,7 +38,7 @@ def main():
         subprocess.run(args, check=True)
         print("\n" + "=" * 50)
         print("Build completed successfully!")
-        print("Your executable is located in the 'dist/MicroDosimeter' folder.")
+        print("Your executable is located in the 'dist/ATOMIQA' folder.")
     except subprocess.CalledProcessError as e:
         print("\n" + "=" * 50)
         print(
