@@ -359,6 +359,32 @@ my_campaign/
 For quick bench tests the expert simply creates a test workspace (e.g.
 `test_setup/`) with the same mechanism — no special mode exists.
 
+### 5.1 Persistent port names (udev rules)
+
+The `connection.port` of each serial device must be a **persistent name**
+created by a udev rule — not the raw `ttyACM0`, which changes with the plug
+order. One rule per device, matched by the board's **USB serial number**
+(unique per board; two identical Picos stay distinguishable):
+
+```
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0009", ATTRS{serial}=="E6614C31…", SYMLINK+="pico_timing"
+```
+
+The rules are generated **from the hardware configuration** (the symlink
+names are exactly the configured ports):
+
+```bash
+sudo ./setup_udev_rules.sh <workspace>/hardware_config.json
+```
+
+The tool lists the currently plugged boards and asks which is which (or use
+`--map PORT=SERIAL` non-interactively, see `tools/generate_udev_rules.py`),
+then writes `/etc/udev/rules.d/99-atomiqa.rules` and reloads udev. Run it
+once when a setup is first cabled, after editing the configuration's ports,
+or after replacing a board. An old `99-daq-devices.rules` from previous app
+versions can be deleted. Access permissions are unchanged: the user needs
+the usual serial-port group (e.g. `dialout`).
+
 ---
 
 ## 6. Output files
