@@ -42,6 +42,12 @@ hardware abstraction layer.
 
 ### 2.1 Hardware abstraction — configuration, registry, interfaces ("Rules")
 
+> **User-facing reference:** the complete hardware configuration file
+> structure, the campaign workflow around it (workspace link, sha256 check,
+> gate) and the output-file formats are documented in
+> [HARDWARE_CONFIG.md](HARDWARE_CONFIG.md). This section is the technical
+> summary for developers.
+
 The application never talks to concrete hardware directly. It talks to **roles**,
 assigned to physical devices in a **hardware configuration file**
 (`hardware_config.json`, schema version `1.0`; a validated example ships in
@@ -233,7 +239,9 @@ hardware with synthetic data for testing.
 
 Campaign metadata plus the link to the hardware configuration; everything
 hardware (ADC settings, capacitors, wiring, firmware) lives in the hardware
-config file itself, which is copied into the workspace folder at creation:
+config file itself, which is copied into the workspace folder at creation.
+The full workflow (including the sha256 check and archive embedding) is
+documented in [HARDWARE_CONFIG.md](HARDWARE_CONFIG.md):
 
 ```json
 {

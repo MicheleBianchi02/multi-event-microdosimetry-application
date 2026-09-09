@@ -67,6 +67,20 @@ class TestFragments:
         assert len(fragments) == 1
         assert fragments[0]["suggested_id"] == "pico"
         assert len(problems) == 1
+        # listing entries have no 'data': they must go through resolve_fragment
+        assert "data" not in fragments[0]
+
+    def test_resolve_fragment_from_listing_entry(self, tmp_path):
+        (tmp_path / "d.json").write_text(
+            '{"kind": "device", "suggested_id": "pico", "data": {"driver": "pico_serial_v1", "name": "Pico"}}'
+        )
+        listing, _ = em.list_fragments([str(tmp_path)])
+        resolved = em.resolve_fragment(listing[0])  # the library-menu path
+        assert resolved["kind"] == "device"
+        assert resolved["data"]["driver"] == "pico_serial_v1"
+        assert em.resolve_fragment({"kind": "device", "data": {"driver": "x"}})["data"]["driver"] == "x"
+        with pytest.raises(ValueError):
+            em.resolve_fragment({"kind": "device"})
 
 
 class TestAssembly:

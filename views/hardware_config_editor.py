@@ -571,6 +571,11 @@ class HardwareConfigEditorDialog(QDialog):
         self._add_fragment({"suggested_id": fragment.get("suggested_id", "device"), "data": fragment["data"]})
 
     def _add_fragment(self, fragment: dict):
+        try:
+            fragment = em.resolve_fragment(fragment)
+        except (ValueError, OSError, json.JSONDecodeError) as e:
+            QMessageBox.warning(self, "Component Library", f"Cannot load component:\n{e}")
+            return
         if fragment["kind"] == "device":
             new_id = em.add_device(self._cfg, fragment["data"], fragment.get("suggested_id", "device"))
             self._refresh()

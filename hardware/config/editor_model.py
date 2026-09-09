@@ -55,6 +55,17 @@ def load_fragment(path: str) -> dict:
     return fragment
 
 
+def resolve_fragment(entry: dict) -> dict:
+    """Accept either a listing entry ({path, kind, suggested_id, label}) or a
+    full fragment ({kind, suggested_id, data}) and return a full fragment."""
+    if isinstance(entry.get("data"), dict):
+        return entry
+    path = entry.get("path")
+    if not path:
+        raise ValueError("fragment entry has neither 'data' nor 'path'")
+    return load_fragment(path)
+
+
 def validate_fragment(fragment: Any, where: str = "fragment") -> None:
     if not isinstance(fragment, dict):
         raise ValueError(f"{where}: must be a JSON object")
