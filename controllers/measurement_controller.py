@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from datetime import datetime
 
@@ -404,7 +405,7 @@ class MeasurementController(QObject):
             )
             return
 
-        if not simulate and self.hardware.hardware_manager.acquisition_is_virtual:
+        if not self.simulate and self.hardware.hardware_manager.acquisition_is_virtual:
             QMessageBox.information(
                 self.running_view,
                 "Virtual Acquisition",

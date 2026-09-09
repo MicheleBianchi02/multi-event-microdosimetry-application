@@ -177,7 +177,9 @@ class SetupController(QObject):
         timing = self.hardware.hardware_manager.timing
         if not timing:
             return False
-            
+
+        hw_mgr = self.hardware.hardware_manager
+
         if timer_params.get("sample_ramp", False):
             if not hw_mgr.can_ramp_while_acquiring:
                 logger.error(
@@ -206,7 +208,6 @@ class SetupController(QObject):
             success = timing.set_channels(timer_params.get("multiple_channel", False))
 
         # Handle Gains
-        hw_mgr = self.hardware.hardware_manager
         g1_label = timer_params.get("gain_ch1_label")
         if success and g1_label:
             success = hw_mgr.apply_gain(1, g1_label)

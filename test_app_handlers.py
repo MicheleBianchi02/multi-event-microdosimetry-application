@@ -24,7 +24,11 @@ popups = {"question": [], "critical": []}
 
 def _stub_popups(question_answer=True):
     """Stub ALL popups before anything can open one: a real modal QMessageBox
-    blocks the (offscreen) test run forever."""
+    blocks the (offscreen) test run forever.  Resets the record — the dict is
+    module-level and must not leak between tests."""
+    popups["question"].clear()
+    popups["critical"].clear()
+
     def ask(*args, **kwargs):
         popups["question"].append(args[1] if len(args) > 1 else kwargs.get("title", ""))
         return QMessageBox.StandardButton.Yes if question_answer else QMessageBox.StandardButton.No
@@ -189,6 +193,49 @@ def test_on_hardware_new_end_to_end(controller, workspace, monkeypatch):
     controller.main_window.setup_view.refresh_shift_dialog()
 
 
+def test_on_hardware_remove_clears_link_and_unloads(controller, workspace, monkeypatch):
+    """Full Remove Link handler: confirmation, link cleared, manager
+    unloaded (regression: QMessageBox was used without import)."""
+    _stub_popups()
+    source = os.path.join(workspace, "hardware_config.json")
+    with open(source, "w") as f:
+        json.dump(_valid_bench_config(), f)
+    ShiftService.link_hardware_config(workspace, source, setup_file=controller.session_model.setup_file_name)
+    controller._load_hardware_config(source)
+    assert controller.hardware_manager.is_loaded
+
+    controller._on_hardware_remove()  # must not raise
+
+    assert "hardware" not in json.load(open(os.path.join(workspace, controller.session_model.setup_file_name)))
+    assert not controller.hardware_manager.is_loaded
+
+
+def test_apply_configuration_ramp_backstop(controller, workspace):
+    """Apply Configuration with Sample Ramp while one device holds timing +
+    acquisition and the firmware forbids the combination: rejected cleanly
+    (regression: the backstop referenced hw_mgr before it was defined)."""
+    _stub_popups()
+    controller._load_hardware_config(
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "examples",
+            "hardware_config_all_pico.json",
+        )
+    )
+    assert controller.hardware_manager.can_ramp_while_acquiring is False
+
+    ok = controller.setup_controller.send_timing_config(
+        {
+            "sample_ramp": True,
+            "int_time_us": 1000,
+            "reset_time_us": 500,
+            "debug_mode": False,
+            "multiple_channel": False,
+        }
+    )
+    assert ok is False  # rejected, not NameError
+
+
 def test_new_with_custom_setup_file_name(controller, tmp_path, monkeypatch):
     """The user's scenario end-to-end: the workspace's setup file is not
     named setup.json — saving a hardware config must link into THAT file
@@ -255,4 +302,4 @@ def test_new_over_existing_file_asks_for_confirmation(controller, workspace, mon
     )
     assert controller._run_config_editor(em.new_config()) is True
     assert json.load(open(dest)) == accepted
-    assert len(popups["question"]) == 2  # asked again on the second save
+    assert len(popups["question"]) == 1  # asked again on the second save

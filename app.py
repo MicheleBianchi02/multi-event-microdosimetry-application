@@ -254,6 +254,8 @@ class AppController(QObject):
             if workspace and link.get("config_file")
             else None
         )
+        from PyQt6.QtWidgets import QMessageBox
+
         if not config_path or not os.path.exists(config_path):
             QMessageBox.information(
                 self.main_window,
@@ -338,6 +340,8 @@ class AppController(QObject):
         return True
 
     def _on_hardware_remove(self):
+        from PyQt6.QtWidgets import QMessageBox
+
         from services.shift_service import ShiftService
 
         workspace = self.session_model.active_workspace_dir
