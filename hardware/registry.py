@@ -11,9 +11,10 @@ breaks compatibility, register a new code (e.g. "..._v2") and migrate old
 config files via their schema_version.
 """
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
-from hardware.config.schema import DriverDescriptor, TimingCapability
+from hardware.config.schema import DeviceConfig, DriverDescriptor, TimingCapability
 
 logger = logging.getLogger(__name__)
 
@@ -22,41 +23,59 @@ logger = logging.getLogger(__name__)
 class RegisteredDriver:
     driver_class: type
     descriptor: DriverDescriptor
+    factory: Callable[[dict, DeviceConfig], Any] = field(kw_only=True)
 
-    def create(self, connection: dict):
-        """Instantiate the driver from its transport connection block."""
-        connection_type = connection.get("type")
-        if connection_type == "serial":
-            return self.driver_class(
-                port=connection.get("port"),
-                baud_rate=connection.get("baud_rate", 115200),
+    def create(self, connection: dict, device_config: DeviceConfig) -> Any:
+        return self.factory(connection, device_config)
+
+
+def _serial_factory(cls) -> Callable[[dict, DeviceConfig], Any]:
+    def create(connection: dict, device_config: DeviceConfig) -> Any:
+        if connection.get("type") != "serial":
+            raise ValueError(
+                f"driver {cls.__name__} requires a 'serial' connection, "
+                f"got {connection.get('type')!r}"
             )
-        # Other transports (e.g. daqmx) are added with their drivers.
-        raise ValueError(f"unsupported connection type {connection_type!r}")
+        return cls(
+            port=connection.get("port"),
+            baud_rate=connection.get("baud_rate", 115200),
+        )
+
+    return create
 
 
-def _descriptor_from_class(cls) -> DriverDescriptor:
-    return DriverDescriptor(
+def _register(cls, code: str, factory: Callable[[dict, DeviceConfig], Any] = None) -> RegisteredDriver:
+    descriptor = DriverDescriptor(
         capabilities=frozenset(cls.DRIVER_CAPABILITIES),
-        timing=cls.HARDWARE_LIMITS,
-        gain_max_pins=cls.GAIN_MAX_PINS,
-        adc_bits=cls.ADC_BITS,
+        timing=getattr(cls, "HARDWARE_LIMITS", None),
+        gain_max_pins=getattr(cls, "GAIN_MAX_PINS", None),
+        adc_bits=getattr(cls, "ADC_BITS", None),
         adc_native_range=getattr(cls, "ADC_NATIVE_RANGE", None),
     )
-
-
-def _register(cls, code: str) -> RegisteredDriver:
-    return RegisteredDriver(driver_class=cls, descriptor=_descriptor_from_class(cls))
+    return RegisteredDriver(
+        driver_class=cls,
+        descriptor=descriptor,
+        factory=factory or _serial_factory(cls),
+    )
 
 
 def build_registry() -> dict[str, RegisteredDriver]:
     from hardware.pico.pico_daq import PicoSerialDAQ
     from hardware.pic.pic_daq import PICSerialDAQ
+    from hardware.dummy.dummy_acquisition import DummyAcquisition
 
-    return {
+    registry = {
         "pico_serial_v1": _register(PicoSerialDAQ, "pico_serial_v1"),
         "pic_serial_v1": _register(PICSerialDAQ, "pic_serial_v1"),
     }
+    registry["dummy_v1"] = _register(
+        DummyAcquisition,
+        "dummy_v1",
+        factory=lambda connection, device_config: DummyAcquisition(
+            device_config.acquisition if device_config else None
+        ),
+    )
+    return registry
 
 
 DRIVER_REGISTRY: dict[str, RegisteredDriver] = build_registry()

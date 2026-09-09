@@ -62,7 +62,14 @@ class SetupController(QObject):
 
         failed = self.check_connection()
         if not failed:
-            self.setting_window.on_connection_result(True, "All devices auto-connected successfully.")
+            note = (
+                " (acquisition is virtual: no data will be collected)"
+                if self.hardware.hardware_manager.acquisition_is_virtual
+                else ""
+            )
+            self.setting_window.on_connection_result(
+                True, f"All devices auto-connected successfully.{note}"
+            )
         else:
             QMessageBox.warning(
                 self.setting_window, 
@@ -172,6 +179,13 @@ class SetupController(QObject):
             return False
             
         if timer_params.get("sample_ramp", False):
+            if not hw_mgr.can_ramp_while_acquiring:
+                logger.error(
+                    "Ramp sampling rejected: the timing device cannot generate "
+                    "ramp triggers while acquiring."
+                )
+                self.time_window.on_configuration_result(False)
+                return False
             success = timing.configure_ramp(
                 timer_params.get("ramp_dt_us", 10.0),
                 timer_params["int_time_us"],

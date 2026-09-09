@@ -98,13 +98,33 @@ capability the driver cannot fulfil, or declared limits beyond the driver's
 hardcoded ones are all load errors.
 
 **Config lifecycle.** The app runs without any config (simulation and offline
-analysis only; real-hardware features stay disabled with a notice). A config is
-loaded explicitly ("Load Hardware Config…" in the connection panel) or through
-the workspace: creating a workspace copies the chosen config into the workspace
-folder and links it from `setup.json` (file name + sha256); loading the
-workspace loads that config and warns if it was edited outside the app. The
-config file used for a run is embedded verbatim in the measurement archive
-(§4.2), so every measurement carries its own provenance.
+analysis only); proceeding to a measurement requires a workspace with a linked,
+loaded hardware config — the wizard stops the user with a clear message
+otherwise. The config always lives in the workspace folder, beside its
+`setup.json`: importing a file copies it there, and the link (file name +
+sha256) is recorded in `setup.json` and verified on load (warn on mismatch —
+edited outside the app). The workspace dialog's **Hardware Configuration**
+section offers Import/Replace, **Edit…**, and **New from Components…**: the
+editor works on the validated model with live validation (it cannot save an
+invalid file); values fixed by the interface (driver, timing envelope, gain
+pins, ADC properties) are read-only there, while capacitor values, wiring,
+roles and channels are editable. New configurations are assembled from a
+component library (`hardware_library/*.json` fragments: devices and circuits;
+"Save as Component…" extends it). The config file used for a run is embedded
+verbatim in the measurement archive (§4.2), so every measurement carries its
+own provenance.
+
+**Virtual acquisition.** The registered driver `dummy_v1` fills only the
+`acquisition` role with a no-op device: for bench tests of the timing and gain
+interfaces, a measurement can start (the user is notified that no data will be
+collected) without real readout hardware.
+
+**Capability exclusivity.** Some firmware cannot run two operations
+concurrently — e.g. the Pico cannot generate ramp triggers while its ADC
+acquires. Such constraints are hardcoded in the driver
+(`SUPPORTS_RAMP_WHILE_ACQUIRING`) and enforced in the UI: when one device
+holds both the timing and the acquisition role, the Sample Ramp option is
+disabled with an explanatory tooltip.
 
 #### ITimingController (`hardware/interfaces/timing.py`)
 
@@ -170,8 +190,9 @@ Four estimators are computed over the (ROI-filtered) data, each with uncertainti
    becomes the *active workspace*: measurements are saved there, and orphaned
    temporary files from a crash are offered for recovery on workspace load.
 2. **Wizard.** *Welcome* → **Step 1**: choose the operation mode (ME or SE) and
-   connect the hardware. Connection is driven by the loaded hardware configuration
-   JSON. On Linux each device gets a persistent name via a **udev rule — one rule
+   connect the hardware. Proceeding requires a measurement setup: a workspace
+   whose linked hardware configuration has been loaded (or simulation).
+   Connection is driven by the loaded hardware configuration JSON. On Linux each device gets a persistent name via a **udev rule — one rule
    per device** (four in the general case: timing µC, two gain µCs, readout
    system), and the app **auto-connects** to all configured devices at startup or
    on demand (auto-connect button). When auto-connect fails — e.g. on Windows, a
@@ -288,8 +309,6 @@ severities in [BUG.md](BUG.md)):
 
 ## 6. Open design points
 
-- **Hardware config editor**: UI to create/edit the config inside the app (for
-  now the file is written by hand; `examples/` ships a validated template).
 - **Simulation config**: a `hardware_config.json` whose devices use a
   `simulation_*` driver code, so simulation runs through the same config/roles
   path as real hardware.

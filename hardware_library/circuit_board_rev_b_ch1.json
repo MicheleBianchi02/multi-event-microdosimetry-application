@@ -1,0 +1,15 @@
+{
+    "kind": "circuit",
+    "suggested_id": "board_ch1",
+    "label": "Integrator board rev. B (3 switches + 22 pF fixed)",
+    "data": {
+        "name": "Integrator board rev. B",
+        "model": "ATOMIQA integrator rev. B",
+        "fixed_capacitance_pF": 22.0,
+        "switchable_capacitors": [
+            {"id": "c100", "value_pF": 100.0},
+            {"id": "c560", "value_pF": 560.0},
+            {"id": "c3300", "value_pF": 3300.0}
+        ]
+    }
+}

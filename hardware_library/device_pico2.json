@@ -1,0 +1,31 @@
+{
+    "kind": "device",
+    "suggested_id": "pico_1",
+    "label": "Raspberry Pi Pico 2 (timing + gain + acquisition)",
+    "data": {
+        "name": "Pico 2",
+        "driver": "pico_serial_v1",
+        "connection": {"type": "serial", "port": "", "baud_rate": 115200},
+        "note": "Fill in the serial port (udev name) after inserting into a config.",
+        "capabilities": {
+            "timing": {
+                "integration_time_us": {"min": 1, "max": 10000000, "step": 1},
+                "reset_time_us": {"min": 1, "max": 10000000, "step": 1},
+                "period_us": null,
+                "ramp_sampling": {
+                    "supported": true,
+                    "dt_us": {"min": 10, "max": 10000, "step": 10}
+                }
+            },
+            "gain": {"pins": [2, 3, 4]},
+            "acquisition": {
+                "num_channels": 1,
+                "adc": {
+                    "bits": 12,
+                    "input_ranges_volts": [{"min_volts": 0.0, "max_volts": 5.0}],
+                    "supports_oversampling": false
+                }
+            }
+        }
+    }
+}

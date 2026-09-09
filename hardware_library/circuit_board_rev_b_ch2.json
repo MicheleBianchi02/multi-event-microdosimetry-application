@@ -1,0 +1,13 @@
+{
+    "kind": "circuit",
+    "suggested_id": "board_ch2",
+    "label": "Integrator board rev. B (1 switch, no fixed C)",
+    "data": {
+        "name": "Integrator board rev. B (ch2 variant)",
+        "model": "ATOMIQA integrator rev. B",
+        "fixed_capacitance_pF": 0.0,
+        "switchable_capacitors": [
+            {"id": "c100", "value_pF": 100.0}
+        ]
+    }
+}

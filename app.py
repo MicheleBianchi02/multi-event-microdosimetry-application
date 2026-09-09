@@ -53,9 +53,13 @@ class AppController(QObject):
 
         # Load the hardware config linked to the active workspace, if any
         self.session_model.workspace_changed.connect(self._on_workspace_changed)
-        self.main_window.setup_view.setting_window.load_config_requested.connect(
-            self._on_load_config_requested
-        )
+
+        # Hardware-config operations from the workspace dialog
+        setup_view = self.main_window.setup_view
+        setup_view.hardware_import_requested.connect(self._on_hardware_import)
+        setup_view.hardware_edit_requested.connect(self._on_hardware_edit)
+        setup_view.hardware_new_requested.connect(self._on_hardware_new)
+        setup_view.hardware_remove_requested.connect(self._on_hardware_remove)
 
         # Initialize Controllers
         self.setup_controller = SetupController(
@@ -71,15 +75,6 @@ class AppController(QObject):
 
         # Connect Main Window events
         self.setup_controller.simulate_requested.connect(self._on_simulate_requested)
-
-    def _on_load_config_requested(self):
-        from PyQt6.QtWidgets import QFileDialog
-
-        path, _ = QFileDialog.getOpenFileName(
-            self.main_window, "Load Hardware Config", "", "JSON Files (*.json)"
-        )
-        if path:
-            self._load_hardware_config(path)
 
     def _load_hardware_config(self, path: str):
         from hardware.config import ConfigValidationError
@@ -114,6 +109,8 @@ class AppController(QObject):
 
         if not workspace_dir:
             return
+        from PyQt6.QtWidgets import QMessageBox
+
         setup_path = os.path.join(workspace_dir, "setup.json")
         if not os.path.exists(setup_path):
             return
@@ -131,8 +128,8 @@ class AppController(QObject):
                 self.main_window,
                 "No Hardware Config",
                 "This workspace has no hardware configuration linked.\n"
-                "Real-hardware features stay disabled until one is loaded\n"
-                "(button 'Load Hardware Config' in the connection panel).",
+                "Real-hardware features stay disabled until one is imported\n"
+                "(Workspace Settings > Hardware Configuration).",
             )
             return
 
@@ -163,6 +160,189 @@ class AppController(QObject):
                 f"Measurements remain usable, but are not directly comparable\n"
                 f"with earlier ones of this campaign.",
             )
+
+    def _hardware_library_dirs(self) -> list:
+        import os
+
+        return [os.path.join(os.path.dirname(os.path.abspath(__file__)), "hardware_library")]
+
+    def _require_workspace(self) -> bool:
+        from PyQt6.QtWidgets import QMessageBox
+
+        if not self.session_model.active_workspace_dir:
+            QMessageBox.warning(
+                self.main_window,
+                "No Workspace",
+                "Create or load a workspace first (button 'Create/Save "
+                "Workspace' in this dialog): the hardware configuration file "
+                "must live in the same folder as its setup.json.",
+            )
+            return False
+        return True
+
+    def _on_hardware_import(self):
+        import json
+        import os
+
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+
+        from hardware.config import ConfigValidationError, hardware_config_from_dict
+        from hardware.registry import registry_descriptors
+        from services.shift_service import ShiftService
+
+        if not self._require_workspace():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self.main_window, "Import Hardware Config", "", "JSON Files (*.json)"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            hardware_config_from_dict(data, registry_descriptors())
+        except ConfigValidationError as e:
+            QMessageBox.critical(
+                self.main_window,
+                "Invalid Hardware Configuration",
+                "This file is not a valid hardware configuration "
+                "(nothing was changed):\n\n" + "\n".join(f"• {err}" for err in e.errors),
+            )
+            return
+        except Exception as e:
+            QMessageBox.critical(self.main_window, "Hardware Config", f"Could not read {path}:\n{e}")
+            return
+
+        workspace = self.session_model.active_workspace_dir
+        dest = os.path.join(workspace, os.path.basename(path))
+        if os.path.exists(dest) and os.path.abspath(dest) != os.path.abspath(path):
+            try:
+                with open(dest, "r", encoding="utf-8") as f:
+                    same = json.load(f) == data
+            except Exception:
+                same = False
+            if not same:
+                reply = QMessageBox.question(
+                    self.main_window,
+                    "Overwrite Configuration?",
+                    f"{os.path.basename(dest)} already exists in this workspace "
+                    f"with different content.\nOverwrite it and relink?",
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
+        copied = ShiftService.link_hardware_config(workspace, path)
+        self._load_hardware_config(copied)
+        self.main_window.refresh_shift_dialog()
+
+    def _on_hardware_edit(self):
+        import os
+
+        workspace = self.session_model.active_workspace_dir
+        link = {}
+        if workspace:
+            from services.shift_service import ShiftService
+
+            link = ShiftService.read_hardware_link(workspace)
+        config_path = (
+            os.path.join(workspace, link["config_file"])
+            if workspace and link.get("config_file")
+            else None
+        )
+        if not config_path or not os.path.exists(config_path):
+            QMessageBox.information(
+                self.main_window,
+                "Hardware Config",
+                "No hardware configuration is linked to this workspace.\n"
+                "Import one or assemble a new one from components.",
+            )
+            return
+
+        import json
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            initial = json.load(f)
+        if self._run_config_editor(initial):
+            self.main_window.refresh_shift_dialog()
+
+    def _on_hardware_new(self):
+        from hardware.config import editor_model as em
+
+        if not self._require_workspace():
+            return
+        if self._run_config_editor(em.new_config()):
+            self.main_window.refresh_shift_dialog()
+
+    def _run_config_editor(self, initial_config: dict) -> bool:
+        """Open the editor; on accept, write and load the configuration.
+        Returns True if a config was saved and loaded."""
+        import json
+        import os
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        from hardware.config import editor_model as em
+        from hardware.registry import registry_descriptors
+        from services.shift_service import ShiftService
+        from views.hardware_config_editor import HardwareConfigEditorDialog
+
+        dialog = HardwareConfigEditorDialog(
+            initial_config, self._hardware_library_dirs(), self.main_window
+        )
+        if not dialog.exec():
+            return False
+
+        config = dialog.get_config()
+        errors, warnings = em.validate(config, registry_descriptors())
+        if errors:
+            QMessageBox.critical(self.main_window, "Hardware Config", "\n".join(errors))
+            return False
+
+        workspace = self.session_model.active_workspace_dir
+        link = ShiftService.read_hardware_link(workspace)
+        config_name = link.get("config_file") or ShiftService.DEFAULT_HARDWARE_CONFIG_NAME
+        dest = os.path.join(workspace, config_name)
+        if os.path.exists(dest) and initial_config.get("devices"):
+            reply = QMessageBox.question(
+                self.main_window,
+                "Overwrite Configuration?",
+                f"{config_name} already exists in this workspace.\nOverwrite it?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return False
+
+        try:
+            with open(dest, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4)
+        except OSError as e:
+            QMessageBox.critical(self.main_window, "Hardware Config", f"Cannot write {dest}:\n{e}")
+            return False
+
+        ShiftService.link_hardware_config(workspace, dest)
+        self._load_hardware_config(dest)
+
+        if warnings:
+            QMessageBox.warning(self.main_window, "Hardware Config Warnings", "\n".join(warnings))
+        return True
+
+    def _on_hardware_remove(self):
+        from services.shift_service import ShiftService
+
+        workspace = self.session_model.active_workspace_dir
+        if not workspace:
+            return
+        reply = QMessageBox.question(
+            self.main_window,
+            "Remove Hardware Link",
+            "Unlink the hardware configuration from this workspace?\n"
+            "The file stays on disk; real-hardware features will be disabled.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        ShiftService.clear_hardware_link(workspace)
+        self.hardware_manager.unload_config()
+        self.main_window.refresh_shift_dialog()
 
     def _on_simulate_requested(self):
         logger.info("Simulation requested via UI.")

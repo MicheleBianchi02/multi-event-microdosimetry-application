@@ -20,7 +20,6 @@ class SettingWindow(QWidget):
     port_changed = pyqtSignal()
     ports_refresh_requested = pyqtSignal()
     simulate_requested = pyqtSignal()
-    load_config_requested = pyqtSignal()
 
     connect_requested = pyqtSignal(str, str)
 
@@ -87,13 +86,6 @@ class SettingWindow(QWidget):
         self.port_table.itemSelectionChanged.connect(self.on_selection_changed)
 
         # --- Buttons ---
-        self.load_config_btn = QPushButton(" Load Hardware Config…")
-        self.load_config_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.load_config_btn.clicked.connect(self.load_config_requested.emit)
-        self.load_config_btn.setStyleSheet(
-            "padding: 6px 10px; font-size: 11pt; background-color: #6f42c1; color: white; border-radius: 4px; font-weight: bold;"
-        )
-
         self.simulate_btn = QPushButton(" Simulate")
         self.simulate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.simulate_btn.clicked.connect(self.simulate_requested.emit)
@@ -174,7 +166,6 @@ class SettingWindow(QWidget):
 
         # Toolbar (Refresh button and Simulate button)
         toolbar = QHBoxLayout()
-        toolbar.addWidget(self.load_config_btn)
         toolbar.addWidget(self.simulate_btn)
         toolbar.addStretch(1)
         toolbar.addWidget(self.refresh_btn)

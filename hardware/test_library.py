@@ -1,0 +1,126 @@
+"""
+Tests for the shipped component library and the dummy acquisition driver.
+"""
+import copy
+import os
+
+import pytest
+
+from hardware.config import editor_model as em
+from hardware.config.test_config import FULL_REGISTRY, ganged_config
+from hardware.config.schema import DriverDescriptor
+from hardware.core.hardware_manager import HardwareManager
+
+LIBRARY_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hardware_library"
+)
+DUMMY_DESCRIPTOR = DriverDescriptor(capabilities=frozenset({"acquisition"}))
+REGISTRY = {**FULL_REGISTRY, "dummy_v1": DUMMY_DESCRIPTOR}
+
+
+def test_all_shipped_fragments_are_valid():
+    fragments, problems = em.list_fragments([LIBRARY_DIR])
+    assert problems == []
+    kinds = sorted((f["kind"], f["suggested_id"]) for f in fragments)
+    assert kinds == [
+        ("circuit", "board_ch1"),
+        ("circuit", "board_ch2"),
+        ("device", "dummy_acq"),
+        ("device", "pic_gain"),
+        ("device", "pico_1"),
+    ]
+
+
+def test_library_assembly_of_bench_test_config():
+    """Timing+gain on the Pico, virtual acquisition — as assembled in the editor."""
+    cfg = em.new_config()
+    fragments = {f["suggested_id"]: f for f in em.list_fragments([LIBRARY_DIR])[0]}
+
+    pico = em.load_fragment(fragments["pico_1"]["path"])
+    dummy = em.load_fragment(fragments["dummy_acq"]["path"])
+    board = em.load_fragment(fragments["board_ch1"]["path"])
+
+    pico_id = em.add_device(cfg, pico["data"], pico["suggested_id"])
+    # the same physical Pico cannot also be the acquisition when the virtual
+    # device fills that role: strip its acquisition capability like the editor
+    # user would (roles are assigned explicitly)
+    del cfg["devices"][pico_id]["capabilities"]["acquisition"]
+    dummy_id = em.add_device(cfg, dummy["data"], dummy["suggested_id"])
+    board_id = em.add_circuit(cfg, board["data"], board["suggested_id"])
+
+    em.set_role(cfg, "timing", pico_id)
+    em.set_role(cfg, "gain_ch1", pico_id)
+    em.set_role(cfg, "acquisition", dummy_id)
+    em.set_channel(cfg, "ch1", board_id)
+    for cap_id, pin in (("c100", 2), ("c560", 3), ("c3300", 4)):
+        em.set_connection(cfg, "ch1", cap_id, pin)
+
+    errors, warnings = em.validate(cfg, REGISTRY)
+    assert errors == []
+    assert warnings == []
+
+
+def test_dummy_acquisition_in_manager(tmp_path):
+    from hardware.dummy.dummy_acquisition import DummyAcquisition
+    from hardware.registry import DRIVER_REGISTRY
+
+    cfg = copy.deepcopy(ganged_config())
+    cfg["devices"]["dummy_acq"] = {
+        "name": "Virtual acquisition",
+        "driver": "dummy_v1",
+        "connection": {"type": "dummy"},
+        "capabilities": {
+            "acquisition": {
+                "num_channels": 2,
+                "adc": {"bits": 12, "input_ranges_volts": [{"min_volts": 0.0, "max_volts": 5.0}]},
+            }
+        },
+    }
+    # replace the pico acquisition role with the dummy; drop its capability
+    del cfg["devices"]["pico_1"]["capabilities"]["acquisition"]
+    cfg["roles"]["acquisition"] = "dummy_acq"
+
+    path = tmp_path / "bench.json"
+    path.write_text(__import__("json").dumps(cfg))
+
+    manager = HardwareManager()
+    manager.load_config(str(path))
+    assert isinstance(manager.acquisition, DummyAcquisition)
+    assert manager.acquisition_is_virtual
+    for device in manager.devices.values():  # no real serial ports on the bench CI
+        if not getattr(device, "IS_VIRTUAL", False):
+            device.connect = lambda: True
+    assert manager.connect_all() == []
+    assert manager.acquisition.arm() is True
+    assert manager.acquisition.start_measurement(None, None) is True
+    assert manager.acquisition.stop_measurement() is True
+
+    # ramp exclusivity: same device holds timing+acquisition? no (dummy) -> allowed
+    assert manager.can_ramp_while_acquiring is True
+
+
+def test_pico_ramp_exclusivity(tmp_path):
+    manager = HardwareManager()
+    manager.load_config(
+        str(_write(tmp_path, "single.json", _single_channel_pico()))
+    )
+    # timing and acquisition on the same Pico: ramp forbidden by firmware
+    assert manager.can_ramp_while_acquiring is False
+
+
+def _single_channel_pico() -> dict:
+    return all_pico()
+
+
+def all_pico() -> dict:
+    from hardware.config.test_config import all_pico_config
+
+    return all_pico_config()
+
+
+def _write(tmp_path, name, cfg):
+    import json
+
+    path = tmp_path / name
+    path.write_text(json.dumps(cfg))
+    return path

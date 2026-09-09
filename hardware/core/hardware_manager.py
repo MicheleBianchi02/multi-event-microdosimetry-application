@@ -85,7 +85,7 @@ class HardwareManager:
                 logger.error("Driver %s not registered", device_config.driver)
                 continue
             try:
-                self.devices[dev_id] = registered.create(device_config.connection)
+                self.devices[dev_id] = registered.create(device_config.connection, device_config)
             except Exception:
                 logger.exception("Failed to instantiate device %s", dev_id)
 
@@ -146,6 +146,26 @@ class HardwareManager:
     def channels_share_gain(self) -> bool:
         """True if the two channels' gains are physically coupled (ganged pins)."""
         return bool(self.config and channels_share_gain_device(self.config))
+
+    @property
+    def acquisition_is_virtual(self) -> bool:
+        """True when the acquisition role is a dummy device (bench tests of
+        the timing/gain interfaces; no data is collected)."""
+        return bool(getattr(self.acquisition, "IS_VIRTUAL", False))
+
+    @property
+    def can_ramp_while_acquiring(self) -> bool:
+        """Whether ramp sampling and acquisition can run concurrently.
+
+        A firmware property of the timing device (hardcoded in the driver):
+        e.g. the Pico cannot generate ramp triggers while its ADC is
+        acquiring.  Only binding when the same physical device holds both
+        the timing and the acquisition role."""
+        if self.timing is None or self.acquisition is None:
+            return True
+        if self.timing is not self.acquisition:
+            return True
+        return getattr(self.timing, "SUPPORTS_RAMP_WHILE_ACQUIRING", True)
 
     def declared_timing_limits(self) -> Optional[dict]:
         """The declared envelope of the timing device, for the UI spinboxes."""

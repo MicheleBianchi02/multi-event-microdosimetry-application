@@ -117,6 +117,12 @@ class SetupWindow(QWidget):
     change_to_running_window = pyqtSignal()
     load_data_requested = pyqtSignal(str)
     mode_switched = pyqtSignal()
+    # Hardware-config requests from the workspace dialog (handled by the app
+    # controller, which owns the hardware manager)
+    hardware_import_requested = pyqtSignal()
+    hardware_edit_requested = pyqtSignal()
+    hardware_new_requested = pyqtSignal()
+    hardware_remove_requested = pyqtSignal()
 
     def __init__(self, session_model, simulate: bool, hardware_manager=None):
         super().__init__()
@@ -145,7 +151,7 @@ class SetupWindow(QWidget):
             self.connection_successfull
         )
         self.start_config.mode_window.mode_selected.connect(
-            self.check_start_config_ready
+            self.on_mode_selected
         )
         self.run_config.time_window.sent_successfull.connect(self.sent_successfull)
         self.run_config.time_window.editing_time.connect(self.disable_next)
@@ -320,8 +326,21 @@ class SetupWindow(QWidget):
         self.stack_view.currentChanged.connect(self.adjustSize)
 
     def open_workspace_settings(self):
-        dialog = ShiftConfigDialog(self.session, self)
+        dialog = ShiftConfigDialog(self.session, self.hardware_manager, self)
+        widget = dialog.widget
+        widget.hardware_import_requested.connect(self.hardware_import_requested.emit)
+        widget.hardware_edit_requested.connect(self.hardware_edit_requested.emit)
+        widget.hardware_new_requested.connect(self.hardware_new_requested.emit)
+        widget.hardware_remove_requested.connect(self.hardware_remove_requested.emit)
+        self._shift_dialog = dialog
         dialog.exec()
+        self._shift_dialog = None
+
+    def refresh_shift_dialog(self):
+        """Let the open workspace dialog re-read the hardware link state."""
+        dialog = getattr(self, "_shift_dialog", None)
+        if dialog is not None:
+            dialog.widget.refresh_hardware_status()
 
     def go_to_start_config(self):
         self.update_header(
@@ -445,9 +464,35 @@ class SetupWindow(QWidget):
         self.is_hardware_connected = True
         self.check_start_config_ready()
 
+    def on_mode_selected(self, is_single_event: bool):
+        """Mode chosen on Step 1: stop the user here if no measurement setup
+        (workspace with a linked, loaded hardware config) is available."""
+        if not self.simulate and not (
+            self.hardware_manager and self.hardware_manager.is_loaded
+        ):
+            from PyQt6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(
+                self,
+                "No Measurement Setup",
+                "No hardware configuration is loaded.\n\n"
+                "Create a measurement setup first: open ⚙️ Workspace Settings, "
+                "create a workspace and import or assemble the hardware "
+                "configuration of your setup.\n\n"
+                "(For software tests, use the Simulate button instead.)",
+            )
+        self.check_start_config_ready()
+
     def check_start_config_ready(self):
         if self.stack_view.currentIndex() == 1:
-            if self.is_hardware_connected and self.session.single_event is not None:
+            hardware_ok = self.simulate or (
+                self.hardware_manager and self.hardware_manager.is_loaded
+            )
+            if (
+                hardware_ok
+                and self.is_hardware_connected
+                and self.session.single_event is not None
+            ):
                 self.next_bnt.setEnabled(True)
             else:
                 self.next_bnt.setEnabled(False)

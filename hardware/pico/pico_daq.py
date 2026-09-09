@@ -22,6 +22,9 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
     DRIVER_CAPABILITIES = {"timing", "gain", "acquisition"}
     GAIN_MAX_PINS = 3  # the capacitor command carries 3 bits
     ADC_BITS = 12
+    # Firmware constraint: the ramp-trigger mode and the acquisition loop
+    # are mutually exclusive on this device (same uC, one ADC).
+    SUPPORTS_RAMP_WHILE_ACQUIRING = False
     HARDWARE_LIMITS = TimingCapability(
         integration_time_us=ParameterBounds(1, 10_000_000, 1),
         reset_time_us=ParameterBounds(1, 10_000_000, 1),

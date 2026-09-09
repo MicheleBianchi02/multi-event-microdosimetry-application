@@ -2,15 +2,23 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, 
     QLineEdit, QTextEdit, QPushButton, QFileDialog, QMessageBox, QLabel, QComboBox, QGroupBox, QStackedWidget
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import pyqtSignal
 import os
 from services.shift_service import ShiftService
 from core.constants import APP_VERSION, FACILITIES, BEAM_TYPES
 
 class ShiftConfigWidget(QWidget):
-    def __init__(self, session_model, parent=None):
+    # Hardware-config operations are handled by the app controller (it owns
+    # the hardware manager); the widget only emits the requests.
+    hardware_import_requested = pyqtSignal()
+    hardware_edit_requested = pyqtSignal()
+    hardware_new_requested = pyqtSignal()
+    hardware_remove_requested = pyqtSignal()
+
+    def __init__(self, session_model, hardware_manager=None, parent=None):
         super().__init__(parent)
         self.session = session_model
+        self.hardware_manager = hardware_manager
         self.init_ui()
         self.populate_fields()
 
@@ -69,28 +77,54 @@ class ShiftConfigWidget(QWidget):
         self.app_version_input = QLineEdit()
         self.app_version_input.setPlaceholderText(f"Defaults to {APP_VERSION}")
 
-        # Hardware configuration: picked here, copied into the workspace and
-        # linked from setup.json (its content is validated by the app on load)
-        self.hardware_config_input = QLineEdit()
-        self.hardware_config_input.setPlaceholderText(
-            "hardware_config.json to copy into this workspace (optional)"
-        )
-        self.hardware_config_browse = QPushButton("Browse…")
-        self.hardware_config_browse.clicked.connect(self.on_browse_hardware_config)
-        hw_cfg_layout = QHBoxLayout()
-        hw_cfg_layout.addWidget(self.hardware_config_input, 1)
-        hw_cfg_layout.addWidget(self.hardware_config_browse)
-
         self.shift_note_input = QTextEdit()
         self.shift_note_input.setMaximumHeight(80)
 
         form.addRow("Facility:", facility_layout)
         form.addRow("Beam Type:", beam_type_layout)
         form.addRow("App Version:", self.app_version_input)
-        form.addRow("Hardware Config:", hw_cfg_layout)
         form.addRow("Shift Note:", self.shift_note_input)
 
         layout.addWidget(group_box)
+
+        # --- Hardware configuration section ---
+        # The file lives in the workspace folder, beside setup.json, and is
+        # linked from it; importing always copies it into this folder.
+        hw_group = QGroupBox("Hardware Configuration")
+        hw_group.setStyleSheet(group_box.styleSheet())
+        hw_layout = QVBoxLayout(hw_group)
+        hw_layout.setContentsMargins(20, 25, 20, 15)
+
+        self.hw_status_lbl = QLabel()
+        self.hw_status_lbl.setWordWrap(True)
+        self.hw_status_lbl.setStyleSheet("color: #555; font-size: 11pt;")
+        hw_layout.addWidget(self.hw_status_lbl)
+
+        hw_btns = QHBoxLayout()
+        self.hw_import_btn = QPushButton(" Import / Replace…")
+        self.hw_import_btn.setToolTip(
+            "Copy a hardware_config.json file into this workspace and link it."
+        )
+        self.hw_edit_btn = QPushButton(" Edit…")
+        self.hw_edit_btn.setToolTip(
+            "Edit the linked configuration: capacitor values, wiring, roles."
+        )
+        self.hw_new_btn = QPushButton(" New from Components…")
+        self.hw_new_btn.setToolTip("Assemble a configuration from the component library.")
+        self.hw_remove_btn = QPushButton(" Remove Link")
+        self.hw_remove_btn.setToolTip(
+            "Unlink the configuration from this workspace (the file stays on disk)."
+        )
+        self.hw_import_btn.clicked.connect(self.hardware_import_requested.emit)
+        self.hw_edit_btn.clicked.connect(self.hardware_edit_requested.emit)
+        self.hw_new_btn.clicked.connect(self.hardware_new_requested.emit)
+        self.hw_remove_btn.clicked.connect(self.hardware_remove_requested.emit)
+        for b in (self.hw_import_btn, self.hw_edit_btn, self.hw_new_btn, self.hw_remove_btn):
+            hw_btns.addWidget(b)
+        hw_btns.addStretch(1)
+        hw_layout.addLayout(hw_btns)
+
+        layout.addWidget(hw_group)
 
         # Buttons
         btn_layout = QHBoxLayout()
@@ -174,21 +208,7 @@ class ShiftConfigWidget(QWidget):
 
         self.app_version_input.setText(self.session.app_version)
 
-        # show the config already linked to the active workspace, if any
-        import json
-        config_name = ""
-        workspace = getattr(self.session, "active_workspace_dir", None)
-        if workspace:
-            setup_path = os.path.join(workspace, "setup.json")
-            try:
-                with open(setup_path, "r", encoding="utf-8") as f:
-                    config_name = os.path.join(
-                        workspace, json.load(f).get("hardware", {}).get("config_file", "")
-                    )
-            except Exception:
-                config_name = ""
-        self.hardware_config_input.setText(config_name if os.path.exists(config_name) else "")
-
+        self.refresh_hardware_status()
         self.shift_note_input.setPlainText(self.session.shift_note)
 
     def update_session_from_fields(self):
@@ -205,12 +225,43 @@ class ShiftConfigWidget(QWidget):
         self.session.app_version = self.app_version_input.text() or APP_VERSION
         self.session.shift_note = self.shift_note_input.toPlainText()
 
-    def on_browse_hardware_config(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Choose Hardware Config", "", "JSON Files (*.json)"
-        )
-        if file_path:
-            self.hardware_config_input.setText(file_path)
+    def refresh_hardware_status(self):
+        """Show the state of the workspace's hardware link."""
+        workspace = getattr(self.session, "active_workspace_dir", None)
+        if not workspace:
+            self.hw_status_lbl.setText(
+                "No active workspace: create or load one first.\n"
+                "A hardware configuration can then be imported, assembled and edited here."
+            )
+            for b in (self.hw_import_btn, self.hw_edit_btn, self.hw_new_btn, self.hw_remove_btn):
+                b.setEnabled(False)
+            return
+
+        link = ShiftService.read_hardware_link(workspace)
+        if not link.get("config_file"):
+            self.hw_status_lbl.setText("No hardware configuration linked to this workspace.")
+            self.hw_edit_btn.setEnabled(False)
+            self.hw_remove_btn.setEnabled(False)
+            self.hw_import_btn.setEnabled(True)
+            self.hw_new_btn.setEnabled(True)
+            return
+
+        config_path = os.path.join(workspace, link["config_file"])
+        exists = os.path.exists(config_path)
+        loaded = self.hardware_manager is not None and self.hardware_manager.is_loaded
+        sha_short = (link.get("config_sha256") or "?")[:8]
+        status = f"Linked: {link['config_file']} (sha {sha_short}…)"
+        if not exists:
+            status += "  — FILE MISSING"
+        elif loaded and self.hardware_manager.config_sha256 == link.get("config_sha256"):
+            status += "  — loaded"
+        elif loaded:
+            status += "  — differs from the loaded one"
+        self.hw_status_lbl.setText(status)
+        self.hw_edit_btn.setEnabled(exists)
+        self.hw_remove_btn.setEnabled(True)
+        self.hw_import_btn.setEnabled(True)
+        self.hw_new_btn.setEnabled(True)
 
     def on_load_clicked(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -232,8 +283,7 @@ class ShiftConfigWidget(QWidget):
         if file_path:
             if not file_path.endswith(".json"):
                 file_path += ".json"
-            config_source = self.hardware_config_input.text().strip() or None
-            if ShiftService.save_setup(self.session, file_path, config_source):
+            if ShiftService.save_setup(self.session, file_path):
                 self.populate_fields()
                 folder_path = os.path.dirname(file_path)
                 QMessageBox.information(self, "Success", f"Workspace created at:\n{folder_path}\nFile: {os.path.basename(file_path)}")

@@ -148,6 +148,7 @@ class TimeWindow(QWidget):
         self.capacitance_combo_ch1.currentIndexChanged.connect(self.on_cap_change)
         self.capacitance_combo_ch2.currentIndexChanged.connect(self.on_cap_change)
         self._adjusting_linked_gain = False
+        self._ramp_allowed = False
 
         self.beam_energy_input = QLineEdit(str(self.session.beam_energy_mev))
         self.beam_current_input = QLineEdit(str(self.session.beam_current_na))
@@ -502,9 +503,22 @@ class TimeWindow(QWidget):
         else:
             self.capacitance_combo_ch2.setToolTip("")
 
+        # Firmware constraint: on some devices (e.g. the Pico) ramp sampling
+        # and acquisition cannot run concurrently; when the same physical
+        # device holds both roles the option is disabled, not hidden.
         supports_ramp = manager is not None and manager.supports_ramp_sampling
+        self._ramp_allowed = supports_ramp and manager.can_ramp_while_acquiring
         self.sample_ramp_cb.setVisible(supports_ramp)
         self.ramp_dt_widget.setVisible(supports_ramp)
+        self.sample_ramp_cb.setEnabled(self._ramp_allowed)
+        if not self._ramp_allowed:
+            self.sample_ramp_cb.setChecked(False)
+            self.sample_ramp_cb.setToolTip(
+                "This device cannot generate ramp triggers while its ADC is "
+                "acquiring: use a separate timing controller for ramp sampling."
+            )
+        else:
+            self.sample_ramp_cb.setToolTip("")
 
         # Channel gating (B8): the acquisition system bounds the choice
         if not dual_possible:
@@ -589,7 +603,7 @@ class TimeWindow(QWidget):
         self.magnitude_rst.setEnabled(not locked)
         self.mode_menu.setEnabled(not locked)
         self.num_channel_box.setEnabled(not locked)
-        self.sample_ramp_cb.setEnabled(not locked)
+        self.sample_ramp_cb.setEnabled(not locked and self._ramp_allowed)
         self.ramp_dt_input.setEnabled(not locked)
         self.capacitance_combo_ch1.setEnabled(not locked)
         self.capacitance_combo_ch2.setEnabled(not locked)

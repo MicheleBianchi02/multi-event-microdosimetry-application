@@ -1,0 +1,21 @@
+{
+    "kind": "device",
+    "suggested_id": "dummy_acq",
+    "label": "Virtual acquisition (dummy, no data) — bench tests only",
+    "data": {
+        "name": "Virtual acquisition",
+        "driver": "dummy_v1",
+        "connection": {"type": "dummy"},
+        "note": "Virtual device for testing the timing and gain interfaces: all commands succeed, start succeeds, but no data is collected.",
+        "capabilities": {
+            "acquisition": {
+                "num_channels": 2,
+                "adc": {
+                    "bits": 12,
+                    "input_ranges_volts": [{"min_volts": 0.0, "max_volts": 5.0}],
+                    "supports_oversampling": false
+                }
+            }
+        }
+    }
+}

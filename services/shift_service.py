@@ -94,6 +94,55 @@ class ShiftService:
             return False
 
     @staticmethod
+    def link_hardware_config(workspace: str, source_path: str, config_name: str = None) -> str:
+        """Copy a hardware config file into the workspace folder and update
+        the link (name + sha256) in the existing setup.json.
+
+        The caller must validate the file before calling this.  Returns the
+        copied file path.
+        """
+        name = config_name or os.path.basename(source_path)
+        dest = os.path.join(workspace, name)
+        if os.path.abspath(source_path) != os.path.abspath(dest):
+            shutil.copy2(source_path, dest)
+
+        from hardware.config import file_sha256
+        setup_path = os.path.join(workspace, "setup.json")
+        setup_data = {}
+        if os.path.exists(setup_path):
+            with open(setup_path, "r", encoding="utf-8") as f:
+                setup_data = json.load(f)
+        setup_data["hardware"] = {"config_file": name, "config_sha256": file_sha256(dest)}
+        with open(setup_path, "w", encoding="utf-8") as f:
+            json.dump(setup_data, f, indent=4)
+        return dest
+
+    @staticmethod
+    def clear_hardware_link(workspace: str) -> None:
+        """Remove the hardware link from setup.json (the file stays on disk)."""
+        setup_path = os.path.join(workspace, "setup.json")
+        if not os.path.exists(setup_path):
+            return
+        with open(setup_path, "r", encoding="utf-8") as f:
+            setup_data = json.load(f)
+        setup_data.pop("hardware", None)
+        with open(setup_path, "w", encoding="utf-8") as f:
+            json.dump(setup_data, f, indent=4)
+
+    @staticmethod
+    def read_hardware_link(workspace: str) -> dict:
+        """The hardware block of the workspace's setup.json ({} if absent)."""
+        setup_path = os.path.join(workspace, "setup.json")
+        if not os.path.exists(setup_path):
+            return {}
+        try:
+            with open(setup_path, "r", encoding="utf-8") as f:
+                return json.load(f).get("hardware", {})
+        except Exception:
+            logger.exception("Failed to read setup.json")
+            return {}
+
+    @staticmethod
     def check_for_recovery(folder_path: str) -> bool:
         """Checks if there are orphaned temp files in the given workspace directory."""
         csv_tmp = os.path.join(folder_path, ".active_run.csv.tmp")

@@ -34,6 +34,7 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
     DRIVER_CAPABILITIES = {"timing", "gain", "acquisition"}
     GAIN_MAX_PINS = 1  # single 'C' Y/N capacitor command
     ADC_BITS = 12
+    SUPPORTS_RAMP_WHILE_ACQUIRING = True  # no ramp support at all
     HARDWARE_LIMITS = TimingCapability(
         integration_time_us=ParameterBounds(1, 512_000_000, 1),
         reset_time_us=ParameterBounds(1, 512_000_000, 1),

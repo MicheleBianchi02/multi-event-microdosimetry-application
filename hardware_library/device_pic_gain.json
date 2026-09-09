@@ -1,0 +1,14 @@
+{
+    "kind": "device",
+    "suggested_id": "pic_gain",
+    "label": "PIC (gain controller, 1 GPIO)",
+    "data": {
+        "name": "PIC gain controller",
+        "driver": "pic_serial_v1",
+        "connection": {"type": "serial", "port": "", "baud_rate": 115200},
+        "note": "Single GPIO: can drive one switchable capacitor per circuit.",
+        "capabilities": {
+            "gain": {"pins": [2]}
+        }
+    }
+}

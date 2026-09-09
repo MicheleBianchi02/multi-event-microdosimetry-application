@@ -399,6 +399,15 @@ class MeasurementController(QObject):
             )
             return
 
+        if not simulate and self.hardware.hardware_manager.acquisition_is_virtual:
+            QMessageBox.information(
+                self.running_view,
+                "Virtual Acquisition",
+                "The acquisition interface is virtual (dummy): no data will be "
+                "collected.\nUse this mode to verify the timing and gain "
+                "outputs on the bench.",
+            )
+
         simulate = self.simulate
         if simulate:
             period = self.session.int_time + self.session.reset_time
