@@ -318,9 +318,11 @@ class DataModel:
         self.update_histogram(filtered_batch)
         self.update_online_statistics(filtered_batch)
 
+        # Return the raw converted samples: the archive must store unfiltered
+        # data, with ROIs re-applied from settings.json on load.
         if debug_mode:
-            return start_value, stop_value, filtered_batch
-        return filtered_batch
+            return start_value, stop_value, new_data
+        return new_data
 
     def append_measurements(self, new_data: np.ndarray) -> None:
         """

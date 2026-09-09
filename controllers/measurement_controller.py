@@ -114,7 +114,7 @@ class MeasurementController(QObject):
                     stop_data = self.data_model.stop_data[: self.data_model.ptr, :]
                     self._write_data_to_file_object(f, (start_data, stop_data))
                 else:
-                    data = self.data_model.filtered_data[: self.data_model.ptr, :]
+                    data = self.data_model.data[: self.data_model.ptr, :]
                     self._write_data_to_file_object(f, data)
                     
         import datetime

@@ -1,8 +1,8 @@
 # Known bugs — ATOMIQA 3.0
 
 Deviations of the current code from the intended behaviour documented in
-[README.md](README.md). No fix has been applied yet; this file is the tracking
-list.
+[README.md](README.md). This file is the tracking list; entries marked **FIXED**
+have been resolved (see the note on each entry).
 
 Severity scale:
 
@@ -16,7 +16,7 @@ Severity scale:
 
 ## HIGH
 
-### B1 — Saved CSV contains ROI-filtered data instead of raw data
+### B1 — Saved CSV contains ROI-filtered data instead of raw data — **FIXED**
 - **Intended:** `data.csv` in the measurement ZIP stores the raw samples; time/channel
   ROIs are saved in `settings.json` and re-applied when the file is loaded.
 - **Current:** the online stream writes the ROI-filtered batch
@@ -26,6 +26,11 @@ Severity scale:
   in the CSV is ambiguous (overflow, negative difference, or ROI-excluded).
 - **Fix direction:** write the raw converted arrays (`data_model.data` /
   unfiltered batches); the load path already re-applies ROIs from `settings.json`.
+- **Fixed (2026-09-09):** `DataModel.ingest_raw_batch` now returns the raw converted
+  samples (ROI filtering still feeds histograms/statistics internally), and the
+  from-memory dump in `handle_save_data` writes `data_model.data`. NaN in the CSV
+  now means only overflow or (debug mode) a negative start→stop difference.
+  Regression tests: `models/test_data_model.py`.
 
 ### B2 — Connection failures are always reported as success
 - **Intended:** connection is driven by the loaded hardware configuration JSON.
