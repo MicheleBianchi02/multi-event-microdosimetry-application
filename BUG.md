@@ -1,0 +1,192 @@
+# Known bugs — ATOMIQA 3.0
+
+Deviations of the current code from the intended behaviour documented in
+[README.md](README.md). No fix has been applied yet; this file is the tracking
+list.
+
+Severity scale:
+
+- **HIGH** — data loss, silently wrong results, or a core flow (connect/save)
+  that does not fail when it should.
+- **MEDIUM** — a feature is wrong or missing in realistic configurations
+  (split hardware, reload of archives, different ADCs), without direct data loss.
+- **LOW** — cosmetic, dead code, fragile coupling, or metadata inconsistency.
+
+---
+
+## HIGH
+
+### B1 — Saved CSV contains ROI-filtered data instead of raw data
+- **Intended:** `data.csv` in the measurement ZIP stores the raw samples; time/channel
+  ROIs are saved in `settings.json` and re-applied when the file is loaded.
+- **Current:** the online stream writes the ROI-filtered batch
+  (`controllers/measurement_controller.py:512-519`) and the from-memory dump writes
+  `data_model.filtered_data` (`controllers/measurement_controller.py:117`). Samples
+  excluded by an active ROI are permanently lost in the archive. Additionally a NaN
+  in the CSV is ambiguous (overflow, negative difference, or ROI-excluded).
+- **Fix direction:** write the raw converted arrays (`data_model.data` /
+  unfiltered batches); the load path already re-applies ROIs from `settings.json`.
+
+### B2 — Connection failures are always reported as success
+- **Intended:** connection is driven by the loaded hardware configuration JSON.
+  On Linux each device gets a persistent name via a udev rule — one rule per
+  device (four in the general case: timing µC, two gain µCs, readout system);
+  transports may differ per device (plain serial for the µCs, USB/instrument
+  protocol e.g. NI for the readout). The app auto-connects to all configured
+  devices at startup or via an auto-connect button. If auto-connect fails
+  (Windows, device not connected, udev rules missing), a manual-connect dialog
+  lets the user map each configured device to an available connection. Whether
+  `verify_connection` (the `V` handshake) belongs to this flow or is removed is
+  still to be decided.
+- **Current:** `HardwareManager.connect_all()` builds the `failed` list but has no
+  `return` statement, so it returns `None` (`hardware/core/hardware_manager.py:126-138`).
+  `SetupController.auto_connect` / `on_connect_requested` treat `None` as success and
+  show "All devices auto-connected successfully" even when nothing is connected.
+  The `V` handshake exists on both serial drivers but is never called, so
+  "connected" only means "serial port opened". The shipped `setup_udev_rules.sh`
+  also creates only a single rule (the Pico), not one per device.
+- **Fix direction:** `return failed` in `connect_all`; implement the JSON-driven
+  auto-connect and the per-device manual-connect dialog; extend the udev rules to
+  one per device; decide the fate of `verify_connection`.
+
+### B3 — Manual port mapping passes the port name instead of the device path
+- **Intended:** from the manual-connect dialog (see B2), mapping a configured
+  device to a serial port connects to that port.
+- **Current:** `SettingWindow` stores both the name (e.g. `ttyACM0`) and the device
+  path (e.g. `/dev/ttyACM0`, kept in `selected_device`), but emits the *name*
+  (`views/setting_window.py:302`); `selected_device` is never read anywhere. On
+  Linux the driver then tries to open a relative path and fails, so the manual
+  fallback (needed when udev auto-connect fails, i.e. exactly when B2 shows up)
+  is unusable.
+- **Fix direction:** emit `selected_device` (falling back to the name on platforms
+  where they coincide).
+
+## MEDIUM
+
+### B4 — Selected gain is not persisted in the measurement archive
+- **Intended:** `settings.json` stores, per channel, the applied GPIO mask and the
+  total capacitance; loading a measurement restores them.
+- **Current:** `DataExporter.build_settings_dict` exports `capacitor_code_ch1/2`,
+  which are never updated from the applied mask and remain the default `"1000"`
+  (`services/data_exporter.py:63-71`); the actual capacitances
+  (`session.capacitance_pf_ch1/2`) are not exported at all, and
+  `handle_load_data` does not restore them. After loading an archive, the
+  charge-axis scaling silently uses the current session value (default 100 pF).
+- **Fix direction:** export `gpio_mask` + `capacitance_pF` per channel and restore
+  them on load.
+
+### B5 — SE/ME command routed to the acquisition device instead of both gain controllers
+- **Intended:** the SE/ME line belongs to the gain controllers; switching mode
+  calls `set_event_mode` on **both** `gain_ch1` and `gain_ch2`, so both electronics
+  receive the signal. `set_event_mode` is part of the `IGainController` contract.
+- **Current:** `SetupController.on_mode_switched` calls `set_event_mode` on the
+  *acquisition* role only (`controllers/setup_controller.py:147-151`), and
+  `set_event_mode` is in none of the three interfaces. It works today only because
+  one device holds all roles. With split hardware (e.g. NI acquisition), the
+  command goes to the wrong device or is silently skipped (`hasattr` guard).
+- **Fix direction:** move `set_event_mode` into `IGainController`; call it on both
+  gain controllers. Future extension: per-channel event mode (ME on one detector,
+  SE on the other).
+
+### B6 — ADC bit depth is hardcoded; should come from the acquisition interface
+- **Intended:** the number of ADC bits (and everything derived from it: histogram
+  bins, overflow sentinel, sample validation) is dynamic and provided by
+  `IDataAcquisition.get_adc_settings()`.
+- **Current:** `NUM_BIT = 12`, `NUM_BINS = 4096`, `OVERFLOW_VALUE = 32768` are
+  constants (`core/constants.py`); `DataModel` buffers and histogram clipping, the
+  drivers' sample validation, and `load_file` all use them. `get_adc_settings()`
+  is implemented by the drivers but never called; `adc_num_bits` in setup.json /
+  settings.json is informational only. With a 16-bit ADC, samples ≥ 4096 would be
+  dropped from histograms and a legitimate reading of exactly 32768 would be
+  treated as overflow (→ NaN on load).
+- **Fix direction:** derive bins/sentinel from the acquisition device settings at
+  session start; keep a serialized value in the archives for offline loading.
+
+### B7 — Gain table is not constrained by the controller's GPIO capability
+- **Intended:** the offered gain combinations depend both on the circuit (which
+  capacitors exist) and on the µC (`num_gpios_per_channel`): a µC with fewer GPIOs
+  than the circuit's switchable capacitors must offer only the combinations it can
+  actually drive, and vice versa.
+- **Current:** `HardwareManager._calc_channel_gains` uses only
+  `hardware_config.json` `gain_settings`; `num_gpios_per_channel` is never called
+  anywhere. E.g. a 3-switch channel assigned to the PIC (1 GPIO) would still list
+  all 8 combinations, and only `gpio_mask[0]` would actually be applied.
+- **Fix direction:** clip/validate the combination table against the gain
+  controller's declared GPIO count (also used by the future GPIO→capacitor
+  mapping, see README §6).
+
+### B8 — Dual-channel UI offered with hardware that acquires one channel only
+- **Intended:** the channel selection reflects what the acquisition system can
+  actually read (or warns).
+- **Current:** the Pico reader fills CH2 with the overflow sentinel in both
+  operational and debug mode (`hardware/pico/pico_daq.py:286-293`), consistent with
+  its single-ADC firmware, but the UI still offers dual-channel mode and a CH2
+  gain combo when the Pico holds the acquisition role. A user measuring "two
+  channels" silently gets nothing on CH2. (The general two-detector case works
+  only with the PIC or a future NI acquisition driver.)
+- **Fix direction:** advertise the channel capability (e.g. via
+  `get_adc_settings()`) and gate the single/dual-channel choice on it.
+
+## LOW
+
+### B9 — `PICSerialDAQ.configure_ramp` is defined twice; the surviving one returns success
+- `hardware/pic/pic_daq.py:171` returns `False` (unsupported), but the second
+  definition at `:264` overrides it and returns `True` "Ignoring". Direct calls
+  would report success while doing nothing. Currently unreachable from the UI
+  (ramp checkbox hidden for `supports_ramp_sampling = False`).
+
+### B10 — `PicoSerialDAQ.num_gpios_per_channel` returns 1, contradicting its own protocol
+- The Pico gain command drives 3 bits and `set_gpio_mask` handles 3 bits
+  (`hardware/pico/pico_daq.py:94-96` vs `:98-125`). Dead code today (see B7) but
+  wrong the moment it is used.
+
+### B11 — Version/name strings inconsistent
+- Intended app identity: **ATOMIQA 3.0**. Currently `APP_VERSION = "v2.2.0"`
+  (`core/constants.py:3`, shown in the window title and written into
+  `settings.json`), `pyproject.toml` says `ATOMIQA 1.5`, and the PyInstaller bundle
+  is named `MicroDosimeter` (`build.py`).
+
+### B12 — Default capacitor base values disagree with the shipped config
+- `SessionModel`/`ShiftService` default to `[22, 100, 560, 3000]` pF
+  (`models/session_model.py:56-57`) while `hardware_config.json` uses 3300 pF for
+  the largest switchable capacitor. Informational field only, but invites wrong
+  analysis inputs when no workspace is loaded.
+
+### B13 — Frozen build resolves config/data paths against the CWD
+- `hardware_config.json` and `data/pristine` are opened with relative paths
+  (`app.py:44-46`, `controllers/setup_controller.py:39-40`). In the PyInstaller
+  bundle `data/` is packed via `--add-data` (resolved against `_MEIPASS`), so the
+  frozen app loses the Bragg data (and the hardware config) unless launched from
+  the right directory.
+
+### B14 — Legacy "starting time" recovery path is unreachable
+- `_read_starting_time` looks for the `starting time :` marker in the first line
+  (`controllers/measurement_controller.py:578-593`), but `load_file` rejects any
+  first line that has neither the timing header nor a `timestamp` prefix, so the
+  marker can never be found; the fallback is "now".
+
+### B15 — Debug `stop_value` overflow handling differs between live and loaded data
+- Live conversion replaces overflow with NaN in the returned stop array
+  (`core/data_utils.py:45-46`); the file loader keeps the raw 32768 values in
+  `result["stop_value"]` (`core/load_file.py:98`). Cosmetic inconsistency between
+  live and reloaded debug sessions.
+
+### B16 — Pico gain state cache assumes CH1 is always configured before CH2
+- `set_gpio_mask` offsets CH2's bits past `_ch1_mask_len`
+  (`hardware/pico/pico_daq.py:106-113`); if CH2 were applied first it would land
+  on bits 0-2 and be overwritten by CH1 later. `send_timing_config` happens to
+  apply CH1 first, so this works today, but the coupling is fragile.
+
+### B17 — Dead code and housekeeping
+- Superseded pre-refactor drivers still in the tree: `services/daq_interface.py`,
+  `services/pico_serial_daq.py`, `services/pic_serial_daq.py` (not imported
+  anywhere), and `core/timing.py` (timing math moved into the PIC driver).
+- `ITimingController.get_timing_limits()` implemented by both drivers, never
+  called (the UI does not validate timing inputs against the hardware limits).
+- `AnalysisService.calculate_acf/calculate_pacf` never called (ACF/PACF not wired
+  into the running window; only MA + FFT are).
+- `AppController._on_stop_measurement` (`app.py:92`) is never connected.
+- `MeasurementController.calculate_results` contains an `if False:` block
+  (`controllers/measurement_controller.py:674`) that disables the auto-update of
+  analysis results inside a saved ZIP (`DataExporter.update_analysis_in_zip`).
+- Duplicated `setCheckable(True)` calls in `views/mode_window.py:37-38,55-56`.

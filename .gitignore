@@ -1,0 +1,22 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+
+# Test and benchmark caches
+.pytest_cache/
+.benchmarks/
+.coverage*
+
+# PyInstaller artifacts
+build/
+dist/
+
+# App runtime artifacts (crash-recovery temps written into the workspace)
+.active_run.*
+*.tmp
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

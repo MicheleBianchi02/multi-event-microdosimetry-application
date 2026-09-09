@@ -1,0 +1,11 @@
+# Enter the range for each beam energy & step after the colon.
+# E.g., 70Mev/10um: 4.2
+70Mev/300: 4.25
+119Mev/300: 10.7
+153Mev/300: 16.8
+179Mev/50: 22.0
+179Mev/100: 22.0
+179Mev/300: 22.0
+202Mev/50: 27.0
+202Mev/100: 27.0
+202Mev/300: 27.0

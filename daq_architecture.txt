@@ -1,0 +1,133 @@
+================================================================================
+DAQ HARDWARE ABSTRACTION LAYER (HAL) - IMPLEMENTATION GUIDE
+================================================================================
+
+1. ARCHITECTURE OVERVIEW
+------------------------
+This system uses the "Strategy Pattern". The main application does not know what 
+hardware is connected. It only talks to an Abstract Base Class (DAQInterface). 
+Specific hardware drivers (e.g., PicoSerialDAQ, NIEthernetDAQ) inherit from this 
+interface and handle the dirty work (Serial/Ethernet parsing, background threads).
+
+2. RECOMMENDED FOLDER STRUCTURE
+-------------------------------
+/project_root
+  /daq_drivers
+    __init__.py
+    base_interface.py     <-- Contains DAQInterface
+    pico_serial.py        <-- Contains PicoSerialDAQ
+    ni_ethernet.py        <-- Contains NIEthernetDAQ (Future)
+  main.py                 <-- Your main application
+
+3. THE ABSTRACT INTERFACE (base_interface.py)
+---------------------------------------------
+import queue
+from abc import ABC, abstractmethod
+
+class DAQInterface(ABC):
+    def __init__(self):
+        self.data_queue = queue.Queue()
+        self.is_measuring = False
+
+    @abstractmethod
+    def connect(self) -> bool: pass
+
+    @abstractmethod
+    def set_event_mode(self, is_single_event: bool) -> bool: pass
+
+    @abstractmethod
+    def set_capacitors(self, cap0: bool, cap1: bool, cap2: bool) -> bool: pass
+
+    @abstractmethod
+    def configure_noramp(self, int_time_us: float, reset_time_us: float) -> bool: pass
+
+    @abstractmethod
+    def configure_ramp(self, ramp_dt_us: float) -> bool: pass
+
+    @abstractmethod
+    def start_measurement(self) -> bool: pass
+
+    @abstractmethod
+    def stop_measurement(self) -> bool: pass
+
+    def read_data(self) -> list:
+        chunk = []
+        while not self.data_queue.empty():
+            try: chunk.append(self.data_queue.get_nowait())
+            except queue.Empty: break
+        return chunk
+
+4. THE PICO IMPLEMENTATION (pico_serial.py)
+-------------------------------------------
+import serial, time, threading
+from .base_interface import DAQInterface
+
+class PicoSerialDAQ(DAQInterface):
+    def __init__(self, port: str, baud_rate: int = 115200):
+        super().__init__()
+        self.port = port
+        self.baud_rate = baud_rate
+        self.ser = serial.Serial()
+        self._read_thread = None
+
+    def connect(self) -> bool:
+        self.ser.port = self.port
+        self.ser.baudrate = self.baud_rate
+        self.ser.timeout = 0.1
+        try:
+            self.ser.open()
+            return self.ser.is_open
+        except serial.SerialException:
+            return False
+
+    def set_event_mode(self, is_single_event: bool) -> bool:
+        cmd = b"RS" if is_single_event else b"RM"
+        self.ser.write(cmd)
+        return self.ser.read(1) == b"D"
+
+    def set_capacitors(self, cap0: bool, cap1: bool, cap2: bool) -> bool:
+        c0 = '1' if cap0 else '0'
+        c1 = '1' if cap1 else '0'
+        c2 = '1' if cap2 else '0'
+        cmd = f"C{c0}{c1}{c2}".encode('ascii')
+        self.ser.write(cmd)
+        return self.ser.read(1) == b"D"
+
+    def configure_noramp(self, int_time_us: float, reset_time_us: float) -> bool:
+        self.ser.write(b"XN")
+        time.sleep(0.01)
+        self.ser.write(f"T {int_time_us},{reset_time_us}\n".encode('ascii'))
+        return self.ser.read(1) == b"D"
+
+    def configure_ramp(self, ramp_dt_us: float) -> bool:
+        self.ser.write(b"XR")
+        time.sleep(0.01)
+        self.ser.write(f"P {ramp_dt_us}\n".encode('ascii'))
+        return self.ser.read(1) == b"D"
+
+    def start_measurement(self) -> bool:
+        self.is_measuring = True
+        self.ser.write(b"S")
+        self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._read_thread.start()
+        return True
+
+    def stop_measurement(self) -> bool:
+        self.is_measuring = False
+        self.ser.write(b"E")
+        if self._read_thread:
+            self._read_thread.join(timeout=1.0)
+        return True
+
+    def _read_loop(self):
+        while self.is_measuring:
+            if self.ser.in_waiting:
+                line = self.ser.readline().decode('ascii').strip()
+                if line:
+                    try:
+                        s1, s2 = line.split(',')
+                        self.data_queue.put((int(s1), int(s2)))
+                    except ValueError:
+                        pass
+            else:
+                time.sleep(0.001)

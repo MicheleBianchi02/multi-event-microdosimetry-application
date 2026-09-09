@@ -1,0 +1,179 @@
+from PyQt6.QtCore import QObject, pyqtSignal
+
+from core.constants import (
+    TX_DELAY_DEBUG_DOUBLE,
+    TX_DELAY_DEBUG_SINGLE,
+    TX_DELAY_PRO_DOUBLE,
+    TX_DELAY_PRO_SINGLE,
+)
+
+
+class SessionModel(QObject):
+    """
+    Holds the application-wide configuration state.
+    Emits signals when important configuration changes, allowing controllers/views to react.
+    """
+
+    # Signals for state changes
+    mode_changed = pyqtSignal(bool)  # emits (debug_mode)
+    channel_mode_changed = pyqtSignal(bool)  # emits (multiple_channel)
+    file_path_changed = pyqtSignal(str)
+    workspace_changed = pyqtSignal(str)  # emits (active_workspace_dir)
+
+    def __init__(self):
+        super().__init__()
+        self._int_time = 1
+        self._reset_time = 1
+        self._sample_freq = 1
+        self._file_path = None
+        self._tx_delay = TX_DELAY_PRO_DOUBLE
+        self._multiple_channel = True
+        self._debug_mode = False
+
+        self.baud_rate = 115200
+        self.port = None
+
+        self.rois = None
+        self.time_rois = []
+        self.calibration_slope = 1.0
+        self.calibration_intercept = 0.0
+
+        self._single_event = False
+        self._increased_gain = False
+        self.capacitance_pf_ch1 = 100.0
+        self.capacitance_pf_ch2 = 100.0
+
+        # --- Workspace & Shift Setup Properties (Optional) ---
+        from core.constants import APP_VERSION
+        self._active_workspace_dir = None
+        self.facility = "TIFPA"
+        self.beam_type = "Biological"
+        self.app_version = APP_VERSION
+        self.hardware_id_ch1 = ""
+        self.hardware_id_ch2 = ""
+        self.firmware_version = ""
+        self.shift_note = ""
+        self.capacitor_base_values_ch1 = [22.0, 100.0, 560.0, 3000.0]
+        self.capacitor_base_values_ch2 = [22.0, 100.0, 560.0, 3000.0]
+        
+        from core.constants import NUM_BIT
+        self.adc_num_bits = NUM_BIT
+        self.adc_vref_volts = 5.0
+
+        # --- Measurement Specific Properties (Optional) ---
+        self.beam_energy_mev = 0.0
+        self.beam_current_na = 0.0
+        self.detector_voltage_v = 0.0
+        self.depth_cm = 0.0
+        self.measurement_note = ""
+        self.is_problematic = False
+        self.capacitor_code_ch1 = "1000"
+        self.capacitor_code_ch2 = "1000"
+        self.timestamp_start = None
+        self.timestamp_end = None
+
+    @property
+    def active_workspace_dir(self):
+        return self._active_workspace_dir
+
+    @active_workspace_dir.setter
+    def active_workspace_dir(self, value):
+        if self._active_workspace_dir != value:
+            self._active_workspace_dir = value
+            self.workspace_changed.emit(value if value else "")
+
+    @property
+    def single_event(self):
+        return self._single_event
+
+    @single_event.setter
+    def single_event(self, value):
+        self._single_event = value
+
+    @property
+    def increased_gain(self):
+        return self._increased_gain
+
+    @increased_gain.setter
+    def increased_gain(self, value):
+        self._increased_gain = value
+
+    @property
+    def int_time(self):
+        return self._int_time
+
+    @int_time.setter
+    def int_time(self, value):
+        self._int_time = value
+
+    @property
+    def reset_time(self):
+        return self._reset_time
+
+    @reset_time.setter
+    def reset_time(self, value):
+        self._reset_time = value
+
+    @property
+    def sample_freq(self):
+        return self._sample_freq
+
+    @sample_freq.setter
+    def sample_freq(self, value):
+        self._sample_freq = value
+
+    @property
+    def file_path(self):
+        return self._file_path
+
+    @file_path.setter
+    def file_path(self, value):
+        if self._file_path != value:
+            self._file_path = value
+            self.file_path_changed.emit(value)
+
+    @property
+    def multiple_channel(self):
+        return self._multiple_channel
+
+    @multiple_channel.setter
+    def multiple_channel(self, value):
+        if value:
+            if self._debug_mode:
+                self._tx_delay = TX_DELAY_DEBUG_DOUBLE
+            else:
+                self._tx_delay = TX_DELAY_PRO_DOUBLE
+        else:
+            if self._debug_mode:
+                self._tx_delay = TX_DELAY_DEBUG_SINGLE
+            else:
+                self._tx_delay = TX_DELAY_PRO_SINGLE
+
+        if self._multiple_channel != value:
+            self._multiple_channel = value
+            self.channel_mode_changed.emit(value)
+
+    @property
+    def debug_mode(self):
+        return self._debug_mode
+
+    @debug_mode.setter
+    def debug_mode(self, value):
+        if value:
+            if self._multiple_channel:
+                self._tx_delay = TX_DELAY_DEBUG_DOUBLE
+            else:
+                self._tx_delay = TX_DELAY_DEBUG_SINGLE
+        else:
+            if self._multiple_channel:
+                self._tx_delay = TX_DELAY_PRO_DOUBLE
+            else:
+                self._tx_delay = TX_DELAY_PRO_SINGLE
+
+        if self._debug_mode != value:
+            self._debug_mode = value
+            self.mode_changed.emit(value)
+
+    @property
+    def tx_delay(self):
+        return self._tx_delay
