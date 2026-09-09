@@ -387,7 +387,104 @@ The charge corresponding to a sample is `Q = C · ΔV` with `C` the channel's
 counts: `V = V_min + counts / (2^bits − 1) · (V_max − V_min)` over the
 recorded input range.
 
-### 6.2 The virtual acquisition
+### 6.2 `settings.json` — field reference
+
+Top-level sections: `file_format_version`, `versions`, `measurement_info`,
+`experimental_setup`, `hardware_settings`, `timing_settings`, `analysis`.
+Sections marked **frozen** document what the hardware actually did: they are
+written at measurement time and are not touched by the offline analysis.
+Sections marked **editable** can be revised after the fact (the measurement
+itself does not change — only its interpretation and bookkeeping).
+
+#### `file_format_version`
+
+`"3.0"` for the current format; `"2.0"` archives and legacy CSVs (format
+"1") load with reduced hardware information (see §7).
+
+#### `versions` — *(editable, informational)*
+
+| Field | Meaning |
+|---|---|
+| `app_version` | Application version that recorded the measurement. |
+
+#### `measurement_info`
+
+| Field | Meaning |
+|---|---|
+| `timestamp_start` / `timestamp_end` | ISO-8601 timestamps of the first and last sample. |
+| `is_problematic` | Flag set manually by the user to mark a measurement as suspect. *(editable)* |
+
+#### `experimental_setup` — *(editable, metadata)*
+
+| Field | Meaning |
+|---|---|
+| `facility`, `beam_type` | Where and what was measured (free text or from the predefined lists). |
+| `beam_energy_MeV`, `beam_current_nA` | Beam parameters during the run. |
+| `depth_cm` | Depth in phantom (for depth-scan campaigns). |
+| `detector_voltage_V` | Detector bias. |
+| `calibration_slope`, `calibration_intercept` | Linear calibration of the amplitude axis: `value_calibrated = slope · value + intercept`. |
+| `shift_note`, `measurement_note` | Free-text notes (campaign-level and per-measurement). |
+
+#### `hardware_settings` — **frozen** (snapshot of what the hardware did)
+
+| Field | Meaning |
+|---|---|
+| `adc.bits`, `adc.input_range_volts` | ADC resolution and the range **applied** during this run. The counts→volts conversion in §6.1 uses exactly these. |
+| `channels.chX.gpio_mask` | Pin states applied for the channel's gain: one boolean per declared pin of the gain device, in the config's pin order. |
+| `channels.chX.capacitance_pF` | Total integration capacitance resulting from the mask (fixed + switched-on capacitors), in pF. This is the `C` of the charge formula. |
+| `single_channel_mode` | `true` when only CH1 was measured. |
+| `hardware_config_sha256` | Fingerprint of the embedded `hardware_config.json`. |
+| `hardware` | Resolved summary of the configuration: devices (name / driver / firmware), circuits with their capacitors, channel→circuit binding, role assignment. |
+
+On load, the app verifies that `gpio_mask` still reproduces
+`capacitance_pF` against the embedded configuration's gain table, and that
+the embedded file matches `hardware_config_sha256`; inconsistencies are
+reported as warnings. Pre-3.0 archives instead carry the old
+`adc_num_bits` / `capacitor_code` fields (informational only).
+
+#### `timing_settings` — **frozen** (the applied timing)
+
+| Field | Meaning |
+|---|---|
+| `integration_time_s`, `reset_time_s` | The **actual** (quantized) times the hardware used — the values the wizard reported before the run, in seconds. |
+| `period_s` | The measurement period. For the current firmware it equals the sum of the two times; a device with a firmware-derived period may differ. |
+| `sample_frequency_hz` | `1 / period_s`; converts the `timestamp` column and the time ROIs. |
+
+#### `analysis` — *(editable: the offline interpretation)*
+
+| Field | Meaning |
+|---|---|
+| `analysis_timestamp` | When the current analysis was computed. |
+| `n_bootstraps` | Number of bootstrap resamples used for the uncertainties (`null` if not computed). |
+| `rois_time_s` | Time filters: list of `[t_start, t_stop]` pairs in seconds. Re-applied to the raw data when the archive is loaded. |
+| `rois_channel` | Amplitude filters: list of `[channel, min, max]` triples (`channel`: 0 = CH1, 1 = CH2; bounds in ADC counts). Re-applied on load. |
+| `results` | The variance–covariance estimators (below). |
+
+`results` contains one entry per estimator — `var` (variance method),
+`var_cov` (successive covariance), `var_autocov` (lag-1 autocovariance) and
+`var_doublecov` (cross-channel covariance, two detectors only). Each
+parameter is a 4-element list with the layout
+**[CH1 value, CH1 uncertainty, CH2 value, CH2 uncertainty]**:
+
+| Parameter | Meaning (per method) |
+|---|---|
+| `N` | Number of samples used. |
+| `Mean` | Mean amplitude (ADC counts). |
+| `Variance` | Variance of the amplitude (counts²). |
+| `Covariance` / `AutoCorrelation` | The covariance term the method subtracts (`var_cov`: covariance of successive samples; `var_autocov`: lag-1 autocovariance; `var_doublecov`: covariance between the two detectors). |
+| `y_bar_d` | The dose-averaged lineal energy estimate: (Variance − Covariance) / Mean. |
+| `cov_mean_sq` / `autocov_mean_sq` | The covariance term relative to the squared mean (used for the uncertainty propagation). |
+
+An `N` of 0 marks a quantity that was not computed (e.g. CH2 in
+single-channel mode, or `var_doublecov` without a second detector).
+Uncertainties are analytical, or from a circular block bootstrap (then
+`n_bootstraps` records the resample count).
+
+Loading an archive restores timing, metadata and ROIs, re-applies the ROIs
+to the raw `data.csv` (the stored data is never pre-filtered), and merges
+the stored `results` back into the analysis view.
+
+### 6.3 The virtual acquisition
 
 For bench tests of the timing and gain interfaces, the library offers a
 **virtual acquisition device** (driver `dummy_v1`). A configuration using it
