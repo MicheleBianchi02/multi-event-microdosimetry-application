@@ -126,6 +126,20 @@ class TestAssembly:
         assert cfg["circuits"]["board_ch1"]["switchable_capacitors"][-1]["id"] == "c560"
         assert all(c["capacitor"] != "c3300" for c in cfg["connections"])
 
+    def test_pending_channel_declared_but_unassigned(self):
+        """Enabling ch2 before choosing its circuit must KEEP the channel
+        (empty circuit), with validation pointing at the missing circuit."""
+        cfg = ganged_config()
+        del cfg["channels"]["ch2"]  # start single-detector
+        em.set_channel(cfg, "ch2", "")
+        assert "ch2" in cfg["channels"]
+        errors, _ = em.validate(cfg, REGISTRY)
+        assert any("ch2" in e and "circuit" in e for e in errors)
+        # assigning the circuit completes it
+        em.set_channel(cfg, "ch2", "board_ch2")
+        errors, _ = em.validate(cfg, REGISTRY)
+        assert not any("ch2" in e and "circuit" in e for e in errors)
+
     def test_set_connection_replaces_edge(self):
         cfg = sample_config()
         em.set_connection(cfg, "ch1", "c100", 4)

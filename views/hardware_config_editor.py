@@ -442,7 +442,7 @@ class HardwareConfigEditorDialog(QDialog):
         for combo, channel in ((self.ch1_circuit_combo, "ch1"), (self.ch2_circuit_combo, "ch2")):
             combo.blockSignals(True)
             combo.clear()
-            combo.addItem("\u2014 inactive \u2014", None)
+            combo.addItem("\u2014 not assigned \u2014", None)
             for circuit_id in circuits:
                 combo.addItem(circuit_id, circuit_id)
             current = self._cfg.get("channels", {}).get(channel, {}).get("circuit")
@@ -756,7 +756,9 @@ class HardwareConfigEditorDialog(QDialog):
             em.set_role(self._cfg, role, combo.currentData())
         em.set_channel(self._cfg, "ch1", self.ch1_circuit_combo.currentData(), self.ch1_adc_input.text().strip() or None)
         if self.ch2_enable.currentIndex() == 1:
-            em.set_channel(self._cfg, "ch2", self.ch2_circuit_combo.currentData(), self.ch2_adc_input.text().strip() or None)
+            # enabling with no circuit chosen yet keeps the channel declared
+            # but unassigned (validated as an error until a circuit is picked)
+            em.set_channel(self._cfg, "ch2", self.ch2_circuit_combo.currentData() or "", self.ch2_adc_input.text().strip() or None)
         else:
             em.set_channel(self._cfg, "ch2", None)
         self._refresh_assignments()

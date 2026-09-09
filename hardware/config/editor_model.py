@@ -185,6 +185,9 @@ def set_role(config: dict, role: str, device_id: Optional[str]) -> None:
 
 
 def set_channel(config: dict, channel: str, circuit_id: Optional[str], adc_input: Optional[str] = None) -> None:
+    """Declare a channel.  circuit_id None removes the channel (and clears its
+    gain role); the empty string declares it as *not yet assigned* — the
+    validator then reports the missing circuit until one is chosen."""
     channels = config.setdefault("channels", {})
     if circuit_id is None:
         if channel in channels:
