@@ -263,6 +263,7 @@ class MeasurementController(QObject):
                 exp_setup = settings.get("experimental_setup", {})
                 self.session.facility = exp_setup.get("facility", getattr(self.session, "facility", ""))
                 self.session.beam_type = exp_setup.get("beam_type", getattr(self.session, "beam_type", ""))
+                self.session.particle = exp_setup.get("particle", getattr(self.session, "particle", ""))
                 self.session.beam_energy_mev = exp_setup.get("beam_energy_MeV", getattr(self.session, "beam_energy_mev", 0.0))
                 self.session.beam_current_na = exp_setup.get("beam_current_nA", getattr(self.session, "beam_current_na", 0.0))
                 self.session.depth_cm = exp_setup.get("depth_cm", getattr(self.session, "depth_cm", 0.0))

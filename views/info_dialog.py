@@ -44,6 +44,7 @@ class InfoDialog(QDialog):
         self.app_version_input = QLineEdit()
         self.app_version_input.setReadOnly(True)
         self.facility_input = QLineEdit()
+        self.particle_input = QLineEdit()
         self.beam_type_input = QLineEdit()
 
         # Hardware identity is a snapshot of what the loaded hardware config
@@ -57,11 +58,13 @@ class InfoDialog(QDialog):
 
         # Connect signals
         self.facility_input.textEdited.connect(self.on_ws_edit)
+        self.particle_input.textEdited.connect(self.on_ws_edit)
         self.beam_type_input.textEdited.connect(self.on_ws_edit)
         self.shift_note_input.textChanged.connect(self.on_ws_edit)
 
         ws_form.addRow("App Ver:", self.app_version_input)
         ws_form.addRow("Facility:", self.facility_input)
+        ws_form.addRow("Particle:", self.particle_input)
         ws_form.addRow("Beam Type:", self.beam_type_input)
         ws_form.addRow("Hardware:", self.hardware_summary_label)
         ws_form.addRow("Shift Note:", self.shift_note_input)
@@ -163,6 +166,7 @@ class InfoDialog(QDialog):
         # Workspace
         self.app_version_input.setText(self.session.app_version)
         self.facility_input.setText(self.session.facility)
+        self.particle_input.setText(getattr(self.session, "particle", ""))
         self.beam_type_input.setText(self.session.beam_type)
 
         manager = getattr(self, "hardware_manager", None)
@@ -221,6 +225,7 @@ class InfoDialog(QDialog):
 
     def on_ws_edit(self):
         self.session.facility = self.facility_input.text()
+        self.session.particle = self.particle_input.text()
         self.session.beam_type = self.beam_type_input.text()
         self.session.shift_note = self.shift_note_input.toPlainText()
 

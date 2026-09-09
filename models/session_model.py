@@ -49,6 +49,7 @@ class SessionModel(QObject):
         self.setup_file_name = "setup.json"  # may carry any name; set on load/save
         self.facility = "TIFPA"
         self.beam_type = "Biological"
+        self.particle = "Proton"
         self.app_version = APP_VERSION
         self.shift_note = ""
         # ADC settings and capacitor values are no longer session defaults:

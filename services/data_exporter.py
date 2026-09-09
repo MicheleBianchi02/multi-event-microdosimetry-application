@@ -74,6 +74,7 @@ class DataExporter:
             "experimental_setup": {
                 "facility": getattr(session_model, 'facility', ""),
                 "beam_type": getattr(session_model, 'beam_type', ""),
+                "particle": getattr(session_model, 'particle', ""),
                 "beam_energy_MeV": getattr(session_model, 'beam_energy_mev', 0.0),
                 "beam_current_nA": getattr(session_model, 'beam_current_na', 0.0),
                 "depth_cm": getattr(session_model, 'depth_cm', 0.0),

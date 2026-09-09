@@ -54,6 +54,7 @@ class ShiftService:
                 "experimental_setup": {
                     "facility": session_model.facility,
                     "beam_type": session_model.beam_type,
+                    "particle": getattr(session_model, "particle", ""),
                     "shift_note": session_model.shift_note,
                 },
                 "hardware": hardware_block,
@@ -86,6 +87,7 @@ class ShiftService:
             exp_setup = setup_data.get("experimental_setup", {})
             session_model.facility = exp_setup.get("facility", session_model.facility)
             session_model.beam_type = exp_setup.get("beam_type", session_model.beam_type)
+            session_model.particle = exp_setup.get("particle", getattr(session_model, "particle", "Proton"))
             session_model.shift_note = exp_setup.get("shift_note", session_model.shift_note)
 
             session_model.setup_file_name = os.path.basename(file_path)

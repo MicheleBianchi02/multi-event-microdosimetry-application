@@ -2,6 +2,7 @@ OVERFLOW_VALUE = 2**15
 
 APP_VERSION = "v2.2.0"
 FACILITIES = ["TIFPA", "CNAO", "Custom"]
+PARTICLES = ["Proton", "Carbon", "Gamma", "Custom"]
 BEAM_TYPES = {
     "TIFPA": ["Biological", "Physical"],
     "CNAO": ["Physical"],

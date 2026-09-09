@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal
 import os
 from services.shift_service import ShiftService
-from core.constants import APP_VERSION, FACILITIES, BEAM_TYPES
+from core.constants import APP_VERSION, FACILITIES, BEAM_TYPES, PARTICLES
 
 class ShiftConfigWidget(QWidget):
     # Hardware-config operations are handled by the app controller (it owns
@@ -62,6 +62,17 @@ class ShiftConfigWidget(QWidget):
         facility_layout.addWidget(self.facility_combo)
         facility_layout.addWidget(self.facility_custom_input)
         
+        # Particle Setup
+        particle_layout = QHBoxLayout()
+        self.particle_combo = QComboBox()
+        self.particle_combo.addItems(PARTICLES)
+        self.particle_combo.currentTextChanged.connect(self.on_particle_changed)
+        self.particle_custom_input = QLineEdit()
+        self.particle_custom_input.setPlaceholderText("Enter custom particle...")
+        self.particle_custom_input.setVisible(False)
+        particle_layout.addWidget(self.particle_combo)
+        particle_layout.addWidget(self.particle_custom_input)
+
         # Beam Type Setup
         beam_type_layout = QHBoxLayout()
         self.beam_type_combo = QComboBox()
@@ -81,6 +92,7 @@ class ShiftConfigWidget(QWidget):
         self.shift_note_input.setMaximumHeight(80)
 
         form.addRow("Facility:", facility_layout)
+        form.addRow("Particle:", particle_layout)
         form.addRow("Beam Type:", beam_type_layout)
         form.addRow("App Version:", self.app_version_input)
         form.addRow("Shift Note:", self.shift_note_input)
@@ -177,6 +189,18 @@ class ShiftConfigWidget(QWidget):
             # Trigger logic to show/hide custom input
             self.on_beam_type_changed(self.beam_type_combo.currentText())
             
+    def on_particle_changed(self, text):
+        self.particle_custom_input.setVisible(text == "Custom")
+
+    def set_particle(self, particle):
+        if particle in PARTICLES and particle != "Custom":
+            self.particle_combo.setCurrentText(particle)
+            self.particle_custom_input.setVisible(False)
+        else:
+            if particle:
+                self.particle_combo.setCurrentText("Custom")
+                self.particle_custom_input.setText(particle)
+
     def on_beam_type_changed(self, text):
         if text == "Custom" or self.facility_combo.currentText() == "Custom":
             self.beam_type_custom_input.setVisible(True)
@@ -205,6 +229,7 @@ class ShiftConfigWidget(QWidget):
             self.workspace_lbl.setText("Active Workspace: None")
 
         self.set_facility_and_beam(self.session.facility, self.session.beam_type)
+        self.set_particle(getattr(self.session, "particle", "Proton"))
 
         self.app_version_input.setText(self.session.app_version)
 
@@ -221,6 +246,11 @@ class ShiftConfigWidget(QWidget):
             self.session.beam_type = self.beam_type_custom_input.text()
         else:
             self.session.beam_type = self.beam_type_combo.currentText()
+
+        if self.particle_combo.currentText() == "Custom":
+            self.session.particle = self.particle_custom_input.text()
+        else:
+            self.session.particle = self.particle_combo.currentText()
             
         self.session.app_version = self.app_version_input.text() or APP_VERSION
         self.session.shift_note = self.shift_note_input.toPlainText()

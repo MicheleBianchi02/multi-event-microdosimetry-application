@@ -231,6 +231,7 @@ class ImportDataWidget(QWidget):
         info = [
             ("App Version:", ver.get("app_version", "N/A")),
             ("Facility:", exp.get("facility", "N/A")),
+            ("Particle:", exp.get("particle", "N/A")),
             ("Beam Type:", exp.get("beam_type", "N/A")),
             ("ADC Bits:", adc.get("bits", hw.get("adc_num_bits", "N/A"))),
             (
