@@ -177,6 +177,57 @@ Severity scale:
 - Not fixed yet: the connection/transport handling is being reworked first
   (deferred with the auto-connect work, B2).
 
+### B19 — Gain application on shared GPIO pins is sequential, not atomic
+- **Intended:** when the same uC controls the gain of two circuits, the
+  shared pins must be accounted for as *one physical switch*: the merged pin
+  state for the pair (CH1 + CH2) is computed first, validated, and then sent
+  once. Mixed wirings — some pins shared between the circuits, some
+  circuit-specific — are supported by the same rule: per shared pin, both
+  channels must agree; circuit-specific pins are free.
+- **Current:** `HardwareManager.apply_gain` stores the requested selection
+  *before* the conflict check, and `send_timing_config` applies CH1 then CH2
+  sequentially. Consequences (all reproduced):
+  - *Apply Configuration* with a conflicting CH2 selection switches CH1's
+    capacitors on the bench first and only then fails: the hardware is left
+    in a gain state different from the last successful Apply, while the UI
+    reports a generic failure.
+  - A *rejected* selection stays in the internal book (`_selected_gain`):
+    afterwards the other channel's selections are validated against the
+    rejected wish instead of the actual hardware state, so valid choices can
+    be rejected ("select matching gains") until the offending channel is
+    re-applied.
+  - With CH2 never selected, any CH1 change freely moves the shared pins;
+    a later CH2 selection that needs the old state is then impossible until
+    CH1 is re-applied.
+- The wizard's linked-gain combos hide most of this in the normal flow
+  (choosing for CH1 constrains CH2 before anything is sent), which is why
+  the impact is limited there.
+- **Fix direction:** compute the merged per-pin state for both channels
+  before touching anything; reject the pair as a whole; send each device
+  once. Wire the wizard to the pair-level apply.
+- Deferred: to be fixed together with the gain-handling rework.
+
+### B20 — Gain table drops capacitors that share a pin
+- **Intended:** a pin may drive several switchable capacitors of a circuit
+  (the loader allows it and warns "they switch together"); the gain table
+  must treat the pin's capacitors as a group contributing the *sum* of their
+  values.
+- **Current:** `channel_routing`
+  (`hardware/config/gain_model.py`) stores the wiring in a dict keyed by
+  pin (`edges[pin] = capacitor`), so when several capacitors are wired to
+  the same pin only the **last** edge survives. The gain table is computed
+  from that single capacitor: e.g. a circuit with 22 pF fixed and
+  c100+c560+c3300 all on one pin yields options 22 / 3322 pF instead of
+  22 / 3982 pF. The new archive consistency check (settings.json vs
+  embedded configuration) inherits the wrong table.
+- Reproduced: gain table of a one-pin gain device with three wired
+  capacitors contains 3322 pF instead of 3982 pF.
+- **Fix direction:** group capacitors per pin in `channel_routing`
+  ({pin: [capacitors]}) and let each pin's combination contribute the sum
+  of its group's values; the gpio_mask semantics (one bit per pin) are
+  unchanged.
+- Deferred: to be fixed together with the gain-handling rework.
+
 ### B9 — `PICSerialDAQ.configure_ramp` is defined twice; the surviving one returns success — **FIXED**
 - `hardware/pic/pic_daq.py:171` returns `False` (unsupported), but the second
   definition at `:264` overrides it and returns `True` "Ignoring". Direct calls

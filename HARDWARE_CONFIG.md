@@ -231,7 +231,15 @@ of that circuit*. Rules:
 - a pin **may** drive capacitors of both circuits (first two lines above):
   the two channels' gains are then *ganged* — they always switch together,
   and the app links the two gain selections in the wizard (choosing for CH1
-  constrains what CH2 can be).
+  constrains what CH2 can be). A wiring may also mix shared and
+  circuit-specific pins; per shared pin, the two channels' selections must
+  agree.
+- **Known limitation** (tracked in BUG.md, B19/B20): gain selections are
+  currently applied per channel sequentially rather than as one merged
+  per-pin state, and a pin driving several capacitors of the same circuit
+  contributes only the last wired capacitor to the gain table. Both are
+  deferred to the gain-handling rework — check BUG.md before relying on
+  shared-pin wirings.
 
 ### 2.6 Validation
 

@@ -315,7 +315,8 @@ severities in [BUG.md](BUG.md)):
 | 1 | Connection handling | per-device auto-connect (one udev rule per device) with manual fallback | connect-all only; a manual dialog maps one device at a time; `verify_connection` still unused | B2 |
 | 2 | ADC bit depth in `DataModel` | histogram bins/overflow derived from the ADC bits | bits/range flow from the config into the archives, but `DataModel` still uses fixed 12-bit bins | B6 |
 | 3 | Ramp sampling | ramp samples acquired and stored | timing triggers only; acquisition side not implemented (deferred by design, not a bug) | — |
-| 4 | Dead legacy code | removed | superseded drivers in `services/`, unused ACF/PACF, `if False:` block remain | B17 |
+| 4 | Gain handling on shared pins | pair-level atomic apply; per-pin groups summed in the gain table | sequential per-channel apply (partial bench states possible); a pin driving several capacitors keeps only the last one in the table — deferred with the gain rework | B19, B20 |
+| 5 | Dead legacy code | removed | superseded drivers in `services/`, unused ACF/PACF, `if False:` block remain | B17 |
 
 ## 6. Open design points
 
