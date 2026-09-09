@@ -189,6 +189,45 @@ def test_on_hardware_new_end_to_end(controller, workspace, monkeypatch):
     controller.main_window.setup_view.refresh_shift_dialog()
 
 
+def test_new_with_custom_setup_file_name(controller, tmp_path, monkeypatch):
+    """The user's scenario end-to-end: the workspace's setup file is not
+    named setup.json — saving a hardware config must link into THAT file
+    and never create a setup.json."""
+    _stub_popups()
+    workspace = str(tmp_path / "ws")
+    os.makedirs(workspace)
+    custom = os.path.join(workspace, "campaign_setup.json")
+    assert ShiftService.save_setup(controller.session_model, custom)
+
+    result = _valid_bench_config()
+    monkeypatch.setattr(
+        "views.hardware_config_editor.HardwareConfigEditorDialog",
+        _fake_dialog_class(result),
+    )
+    controller._on_hardware_new()  # must not raise
+
+    assert not os.path.exists(os.path.join(workspace, "setup.json"))
+    link = json.load(open(custom))["hardware"]
+    assert link["config_file"] == "hardware_config.json"
+    assert controller.hardware_manager.is_loaded
+    # and a later workspace load finds the config through the custom file
+    fresh = _FakeSession()
+    assert ShiftService.load_setup(fresh, custom)
+    assert fresh.setup_file_name == "campaign_setup.json"
+
+
+class _FakeSession:
+    """Minimal session stand-in for load_setup checks."""
+
+    def __init__(self):
+        self.facility = ""
+        self.beam_type = ""
+        self.shift_note = ""
+        self.app_version = ""
+        self.setup_file_name = "setup.json"
+        self.active_workspace_dir = None
+
+
 def test_new_over_existing_file_asks_for_confirmation(controller, workspace, monkeypatch):
     _stub_popups(question_answer=False)  # user declines
     existing = _valid_bench_config()

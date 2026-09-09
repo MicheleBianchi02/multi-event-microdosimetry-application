@@ -237,7 +237,9 @@ class ShiftConfigWidget(QWidget):
                 b.setEnabled(False)
             return
 
-        link = ShiftService.read_hardware_link(workspace)
+        link = ShiftService.read_hardware_link(
+            workspace, setup_file=getattr(self.session, "setup_file_name", "setup.json")
+        )
         if not link.get("config_file"):
             self.hw_status_lbl.setText("No hardware configuration linked to this workspace.")
             self.hw_edit_btn.setEnabled(False)

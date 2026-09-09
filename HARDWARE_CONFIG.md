@@ -329,7 +329,11 @@ my_campaign/
 ```
 
 1. **Create the workspace** (Workspace Settings → *Create/Save Workspace…*):
-   facility, beam type, shift note are stored in `setup.json`.
+   facility, beam type, shift note are stored in `setup.json`. The setup
+   file may carry any name (e.g. `campaign_setup.json`): the app remembers
+   which one it loaded and writes the hardware link there — it never creates
+   a second `setup.json` beside it. The examples below use the conventional
+   `setup.json` name.
 2. **Import or assemble the hardware configuration** (same dialog): the file
    is copied into the folder and `setup.json` records the link:
 

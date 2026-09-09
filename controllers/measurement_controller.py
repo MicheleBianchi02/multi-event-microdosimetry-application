@@ -159,7 +159,7 @@ class MeasurementController(QObject):
                 hardware_config_text=(
                     hardware_manager.config_text if hardware_manager.is_loaded else None
                 ),
-                setup_json_text=self._read_text(self._workspace_file("setup.json")),
+                setup_json_text=self._read_text(self._workspace_setup_file()),
             )
             
             if success:
@@ -356,6 +356,11 @@ class MeasurementController(QObject):
         workspace = getattr(self.session, "active_workspace_dir", None)
         return os.path.join(workspace, name) if workspace else None
 
+    def _workspace_setup_file(self):
+        workspace = getattr(self.session, "active_workspace_dir", None)
+        name = getattr(self.session, "setup_file_name", "setup.json")
+        return os.path.join(workspace, name) if workspace else None
+
     @staticmethod
     def _read_text(path):
         if not path:
@@ -469,7 +474,7 @@ class MeasurementController(QObject):
                         "w",
                     ) as hf:
                         hf.write(manager.config_text)
-                setup_text = self._read_text(os.path.join(self.session.active_workspace_dir, "setup.json"))
+                setup_text = self._read_text(self._workspace_setup_file())
                 if setup_text:
                     with open(
                         os.path.join(self.session.active_workspace_dir, ".active_run.setup.json.tmp"),

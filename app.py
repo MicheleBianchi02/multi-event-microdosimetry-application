@@ -111,7 +111,7 @@ class AppController(QObject):
             return
         from PyQt6.QtWidgets import QMessageBox
 
-        setup_path = os.path.join(workspace_dir, "setup.json")
+        setup_path = os.path.join(workspace_dir, self.session_model.setup_file_name)
         if not os.path.exists(setup_path):
             return
         try:
@@ -232,7 +232,9 @@ class AppController(QObject):
                 if reply != QMessageBox.StandardButton.Yes:
                     return
 
-        copied = ShiftService.link_hardware_config(workspace, path)
+        copied = ShiftService.link_hardware_config(
+            workspace, path, setup_file=self.session_model.setup_file_name
+        )
         self._load_hardware_config(copied)
         self.main_window.refresh_shift_dialog()
 
@@ -244,7 +246,9 @@ class AppController(QObject):
         if workspace:
             from services.shift_service import ShiftService
 
-            link = ShiftService.read_hardware_link(workspace)
+            link = ShiftService.read_hardware_link(
+                workspace, setup_file=self.session_model.setup_file_name
+            )
         config_path = (
             os.path.join(workspace, link["config_file"])
             if workspace and link.get("config_file")
@@ -300,7 +304,9 @@ class AppController(QObject):
             return False
 
         workspace = self.session_model.active_workspace_dir
-        link = ShiftService.read_hardware_link(workspace)
+        link = ShiftService.read_hardware_link(
+            workspace, setup_file=self.session_model.setup_file_name
+        )
         config_name = link.get("config_file") or DEFAULT_HARDWARE_CONFIG_NAME
         dest = os.path.join(workspace, config_name)
         if os.path.exists(dest) and not initial_config.get("devices"):
@@ -322,7 +328,9 @@ class AppController(QObject):
             QMessageBox.critical(self.main_window, "Hardware Config", f"Cannot write {dest}:\n{e}")
             return False
 
-        ShiftService.link_hardware_config(workspace, dest)
+        ShiftService.link_hardware_config(
+            workspace, dest, setup_file=self.session_model.setup_file_name
+        )
         self._load_hardware_config(dest)
 
         if warnings:
@@ -343,7 +351,9 @@ class AppController(QObject):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        ShiftService.clear_hardware_link(workspace)
+        ShiftService.clear_hardware_link(
+            workspace, setup_file=self.session_model.setup_file_name
+        )
         self.hardware_manager.unload_config()
         self.main_window.refresh_shift_dialog()
 

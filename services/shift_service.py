@@ -61,6 +61,7 @@ class ShiftService:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(setup_data, f, indent=4)
 
+            session_model.setup_file_name = os.path.basename(file_path)
             session_model.active_workspace_dir = folder
             return True
         except Exception:
@@ -87,6 +88,7 @@ class ShiftService:
             session_model.beam_type = exp_setup.get("beam_type", session_model.beam_type)
             session_model.shift_note = exp_setup.get("shift_note", session_model.shift_note)
 
+            session_model.setup_file_name = os.path.basename(file_path)
             session_model.active_workspace_dir = os.path.dirname(file_path)
             return True
         except Exception:
@@ -94,9 +96,12 @@ class ShiftService:
             return False
 
     @staticmethod
-    def link_hardware_config(workspace: str, source_path: str, config_name: str = None) -> str:
+    def link_hardware_config(
+        workspace: str, source_path: str, config_name: str = None, setup_file: str = "setup.json"
+    ) -> str:
         """Copy a hardware config file into the workspace folder and update
-        the link (name + sha256) in the existing setup.json.
+        the link (name + sha256) in the workspace's setup file (which may
+        carry any name; the session remembers the one it loaded).
 
         The caller must validate the file before calling this.  Returns the
         copied file path.
@@ -107,7 +112,7 @@ class ShiftService:
             shutil.copy2(source_path, dest)
 
         from hardware.config import file_sha256
-        setup_path = os.path.join(workspace, "setup.json")
+        setup_path = os.path.join(workspace, setup_file)
         setup_data = {}
         if os.path.exists(setup_path):
             with open(setup_path, "r", encoding="utf-8") as f:
@@ -118,9 +123,10 @@ class ShiftService:
         return dest
 
     @staticmethod
-    def clear_hardware_link(workspace: str) -> None:
-        """Remove the hardware link from setup.json (the file stays on disk)."""
-        setup_path = os.path.join(workspace, "setup.json")
+    def clear_hardware_link(workspace: str, setup_file: str = "setup.json") -> None:
+        """Remove the hardware link from the workspace's setup file (the
+        hardware config file itself stays on disk)."""
+        setup_path = os.path.join(workspace, setup_file)
         if not os.path.exists(setup_path):
             return
         with open(setup_path, "r", encoding="utf-8") as f:
@@ -130,9 +136,9 @@ class ShiftService:
             json.dump(setup_data, f, indent=4)
 
     @staticmethod
-    def read_hardware_link(workspace: str) -> dict:
-        """The hardware block of the workspace's setup.json ({} if absent)."""
-        setup_path = os.path.join(workspace, "setup.json")
+    def read_hardware_link(workspace: str, setup_file: str = "setup.json") -> dict:
+        """The hardware block of the workspace's setup file ({} if absent)."""
+        setup_path = os.path.join(workspace, setup_file)
         if not os.path.exists(setup_path):
             return {}
         try:

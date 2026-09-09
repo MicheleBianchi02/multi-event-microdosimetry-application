@@ -46,6 +46,7 @@ class SessionModel(QObject):
         # --- Workspace & Shift Setup Properties (Optional) ---
         from core.constants import APP_VERSION
         self._active_workspace_dir = None
+        self.setup_file_name = "setup.json"  # may carry any name; set on load/save
         self.facility = "TIFPA"
         self.beam_type = "Biological"
         self.app_version = APP_VERSION
