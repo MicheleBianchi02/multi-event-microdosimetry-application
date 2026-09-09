@@ -35,6 +35,7 @@ def session():
 def test_settings_dict_v3(loaded_manager, session):
     settings = DataExporter.build_settings_dict(session, hardware_manager=loaded_manager)
     assert settings["file_format_version"] == "3.0"
+    assert settings["experimental_setup"]["particle"] == session.particle
     hw = settings["hardware_settings"]
     assert hw["adc"]["bits"] == 12
     assert hw["adc"]["input_range_volts"]["max_volts"] == 5.0

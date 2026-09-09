@@ -6,12 +6,7 @@ import copy
 import pytest
 
 from hardware.config import editor_model as em
-from hardware.config.test_config import (
-    FULL_REGISTRY,
-    PICO_DESCRIPTOR,
-    all_pico_config,
-    ganged_config,
-)
+from helpers import FULL_REGISTRY, all_pico_config, ganged_config
 from hardware.config.schema import DriverDescriptor
 
 DUMMY_DESCRIPTOR = DriverDescriptor(capabilities=frozenset({"acquisition"}))

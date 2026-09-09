@@ -70,6 +70,7 @@ def _valid_bench_config() -> dict:
     pico = em.load_fragment(
         os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
+            "..",
             "hardware_library",
             "device_pico2.json",
         )
@@ -77,6 +78,7 @@ def _valid_bench_config() -> dict:
     pic = em.load_fragment(
         os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
+            "..",
             "hardware_library",
             "device_pic.json",
         )
@@ -84,6 +86,7 @@ def _valid_bench_config() -> dict:
     board = em.load_fragment(
         os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
+            "..",
             "hardware_library",
             "circuit_board_rev_b_ch1.json",
         )
@@ -218,6 +221,7 @@ def test_apply_configuration_ramp_backstop(controller, workspace):
     controller._load_hardware_config(
         os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
+            "..",
             "examples",
             "hardware_config_all_pico.json",
         )

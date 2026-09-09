@@ -78,3 +78,21 @@ def test_default_name_is_setup_json(session, tmp_path):
     ShiftService.link_hardware_config(str(tmp_path), str(source))
     link = ShiftService.read_hardware_link(str(tmp_path))
     assert link["config_file"] == "hw.json"
+
+
+def test_particle_saved_and_loaded(session, tmp_path):
+    session.particle = "Carbon"
+    setup_path = tmp_path / "setup.json"
+    assert ShiftService.save_setup(session, str(setup_path))
+    assert json.load(open(setup_path))["experimental_setup"]["particle"] == "Carbon"
+
+    other = SessionModel()
+    assert ShiftService.load_setup(other, str(setup_path))
+    assert other.particle == "Carbon"
+
+    # old workspaces without the field keep the default
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps({"experimental_setup": {"facility": "CNAO"}}))
+    third = SessionModel()
+    assert ShiftService.load_setup(third, str(legacy))
+    assert third.particle == "Proton"

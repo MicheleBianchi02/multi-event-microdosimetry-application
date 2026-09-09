@@ -25,3 +25,6 @@ dev = [
     "black",
     "flake8",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

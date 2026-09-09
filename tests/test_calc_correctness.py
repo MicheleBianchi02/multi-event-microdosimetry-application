@@ -29,11 +29,8 @@ import sys
 import numpy as np
 import pytest
 
-# ---------------------------------------------------------------------------
-# Make sure the api package is importable when running from test_calc/
-# ---------------------------------------------------------------------------
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from calc_stat import calculate_results  # noqa: E402
+# the repo root is on sys.path via the root conftest.py
+from core.calc_stat import calculate_results
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -761,7 +758,7 @@ class TestBootstrapErrorHandling:
         )
         )
 
-        import calc_stat
+        import core.calc_stat as calc_stat  # the same module calculate_results lives in
 
         def mock_optimal_block_length(*args, **kwargs):
             raise ValueError("Mock error")

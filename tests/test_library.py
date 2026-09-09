@@ -7,12 +7,12 @@ import os
 import pytest
 
 from hardware.config import editor_model as em
-from hardware.config.test_config import FULL_REGISTRY, ganged_config
+from helpers import FULL_REGISTRY, ganged_config
 from hardware.config.schema import DriverDescriptor
 from hardware.core.hardware_manager import HardwareManager
 
 LIBRARY_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hardware_library"
+    os.path.dirname(os.path.abspath(__file__)), "..", "hardware_library"
 )
 DUMMY_DESCRIPTOR = DriverDescriptor(capabilities=frozenset({"acquisition"}))
 REGISTRY = {**FULL_REGISTRY, "dummy_v1": DUMMY_DESCRIPTOR}
@@ -113,7 +113,7 @@ def _single_channel_pico() -> dict:
 
 
 def all_pico() -> dict:
-    from hardware.config.test_config import all_pico_config
+    from helpers import all_pico_config
 
     return all_pico_config()
 

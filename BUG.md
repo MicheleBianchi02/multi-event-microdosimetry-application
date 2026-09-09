@@ -30,7 +30,7 @@ Severity scale:
   samples (ROI filtering still feeds histograms/statistics internally), and the
   from-memory dump in `handle_save_data` writes `data_model.data`. NaN in the CSV
   now means only overflow or (debug mode) a negative start→stop difference.
-  Regression tests: `models/test_data_model.py`.
+  Regression tests: `tests/test_data_model.py`.
 
 ### B2 — Connection failures are always reported as success — **PARTIALLY FIXED**
 - **Intended:** connection is driven by the loaded hardware configuration JSON.
@@ -57,7 +57,8 @@ Severity scale:
   list (failures are reported), and connection is driven by the validated
   hardware config (loaded explicitly or via the workspace). Still open: the
   per-device manual-connect dialog for partial setups (the current dialog maps
-  one port at a time) and one-udev-rule-per-device.
+  one port at a time). One-udev-rule-per-device is now generated from the
+  hardware config (`tools/generate_udev_rules.py`).
 
 ### B3 — Manual port mapping passes the port name instead of the device path — **FIXED**
 - **Intended:** from the manual-connect dialog (see B2), mapping a configured

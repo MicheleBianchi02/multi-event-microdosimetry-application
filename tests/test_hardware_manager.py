@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from hardware.config.test_config import all_pico_config, ganged_config, FULL_REGISTRY  # noqa: F401
+from helpers import all_pico_config, ganged_config, FULL_REGISTRY  # noqa: F401
 from hardware.core.hardware_manager import HardwareManager
 
 
@@ -102,7 +102,7 @@ def test_ganged_conflict_rejected(tmp_path, monkeypatch):
 
 
 def test_set_event_mode_both_gain_controllers(tmp_path):
-    from hardware.config.test_config import split_config
+    from helpers import split_config
 
     cfg = split_config()
     # the NI driver does not exist yet: emulate a 2-channel acquisition
@@ -127,7 +127,7 @@ def test_set_event_mode_both_gain_controllers(tmp_path):
 
 
 def test_invalid_config_raises(tmp_path):
-    from hardware.config.test_config import all_pico_config
+    from helpers import all_pico_config
 
     cfg = all_pico_config()
     cfg["roles"]["timing"] = "nonexistent"
@@ -152,7 +152,7 @@ def test_shipped_example_config_loads():
     import os
 
     example = os.path.join(
-        os.path.dirname(__file__), "..", "..", "examples", "hardware_config_all_pico.json"
+        os.path.dirname(__file__), "..", "examples", "hardware_config_all_pico.json"
     )
     manager = HardwareManager()
     manager.load_config(example)
