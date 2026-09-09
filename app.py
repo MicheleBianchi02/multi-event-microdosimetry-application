@@ -284,7 +284,7 @@ class AppController(QObject):
 
         from hardware.config import editor_model as em
         from hardware.registry import registry_descriptors
-        from services.shift_service import ShiftService
+        from services.shift_service import DEFAULT_HARDWARE_CONFIG_NAME, ShiftService
         from views.hardware_config_editor import HardwareConfigEditorDialog
 
         dialog = HardwareConfigEditorDialog(
@@ -301,9 +301,12 @@ class AppController(QObject):
 
         workspace = self.session_model.active_workspace_dir
         link = ShiftService.read_hardware_link(workspace)
-        config_name = link.get("config_file") or ShiftService.DEFAULT_HARDWARE_CONFIG_NAME
+        config_name = link.get("config_file") or DEFAULT_HARDWARE_CONFIG_NAME
         dest = os.path.join(workspace, config_name)
-        if os.path.exists(dest) and initial_config.get("devices"):
+        if os.path.exists(dest) and not initial_config.get("devices"):
+            # creating a NEW configuration over an existing file: confirm.
+            # (When editing, dest is the file being edited — overwriting it
+            # is the intent.)
             reply = QMessageBox.question(
                 self.main_window,
                 "Overwrite Configuration?",
