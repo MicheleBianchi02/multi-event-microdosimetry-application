@@ -167,6 +167,28 @@ def test_edit_saves_back_to_the_linked_file(controller, workspace, monkeypatch):
     assert controller.hardware_manager.config_path == first_dest
 
 
+def test_on_hardware_new_end_to_end(controller, workspace, monkeypatch):
+    """The full 'New from Components' handler, including the post-save
+    refresh of the workspace dialog status (regression: refresh_shift_dialog
+    was called on the main window instead of the setup view)."""
+    _stub_popups()
+    result = _valid_bench_config()
+    monkeypatch.setattr(
+        "views.hardware_config_editor.HardwareConfigEditorDialog",
+        _fake_dialog_class(result),
+    )
+
+    controller._on_hardware_new()  # must not raise
+
+    dest = os.path.join(workspace, "hardware_config.json")
+    assert os.path.exists(dest)
+    assert json.load(open(dest)) == result
+    assert controller.hardware_manager.is_loaded
+    # the delegate works with no dialog open...
+    controller.main_window.refresh_shift_dialog()
+    controller.main_window.setup_view.refresh_shift_dialog()
+
+
 def test_new_over_existing_file_asks_for_confirmation(controller, workspace, monkeypatch):
     _stub_popups(question_answer=False)  # user declines
     existing = _valid_bench_config()

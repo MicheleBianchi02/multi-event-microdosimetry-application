@@ -61,6 +61,10 @@ class View(QWidget):
         self.windows_stack.setCurrentIndex(1)
         self.running_view.on_frequency_change()
 
+    def refresh_shift_dialog(self):
+        """Let the open workspace dialog re-read the hardware link state."""
+        self.setup_view.refresh_shift_dialog()
+
     def restart_window(self):
         # Clear the plot from the previous run
         self.running_view.clear_plot()
