@@ -1,0 +1,81 @@
+{
+    "schema_version": "1.0",
+
+    "devices": {
+        "pico_1": {
+            "name": "Pico 2 — all roles",
+            "driver": "pico_serial_v1",
+            "firmware_version": "1.4",
+            "connection": {
+                "type": "serial",
+                "port": "/dev/pico_daq",
+                "baud_rate": 115200
+            },
+            "note": "udev rule 99-atomiqa-pico.rules creates /dev/pico_daq.",
+            "capabilities": {
+                "timing": {
+                    "integration_time_us": { "min": 1, "max": 10000000, "step": 1 },
+                    "reset_time_us": { "min": 1, "max": 10000000, "step": 1 },
+                    "period_us": null,
+                    "ramp_sampling": {
+                        "supported": true,
+                        "dt_us": { "min": 10, "max": 10000, "step": 10 }
+                    }
+                },
+                "gain": {
+                    "pins": [2, 3, 4],
+                    "note": "Same 3 pins routed to both boards (ganged gains)."
+                },
+                "acquisition": {
+                    "num_channels": 1,
+                    "adc": {
+                        "bits": 12,
+                        "input_ranges_volts": [
+                            { "min_volts": 0.0, "max_volts": 5.0 }
+                        ],
+                        "supports_oversampling": false
+                    }
+                }
+            }
+        }
+    },
+
+    "circuits": {
+        "board_ch1": {
+            "name": "Integrator board — detector 1",
+            "model": "ATOMIQA integrator rev. B",
+            "fixed_capacitance_pF": 22.0,
+            "switchable_capacitors": [
+                { "id": "c100", "value_pF": 100.0 },
+                { "id": "c560", "value_pF": 560.0 },
+                { "id": "c3300", "value_pF": 3300.0 }
+            ],
+            "note": "S/N 004, connector J3."
+        },
+        "board_ch2": {
+            "name": "Integrator board — detector 2",
+            "model": "ATOMIQA integrator rev. B",
+            "fixed_capacitance_pF": 0.0,
+            "switchable_capacitors": [
+                { "id": "c100", "value_pF": 100.0 }
+            ],
+            "note": "S/N 005. No fixed capacitance mounted."
+        }
+    },
+
+    "channels": {
+        "ch1": { "circuit": "board_ch1" }
+    },
+
+    "roles": {
+        "timing": "pico_1",
+        "acquisition": "pico_1",
+        "gain_ch1": "pico_1"
+    },
+
+    "connections": [
+        { "device": "pico_1", "pin": 2, "circuit": "board_ch1", "capacitor": "c100" },
+        { "device": "pico_1", "pin": 3, "circuit": "board_ch1", "capacitor": "c560" },
+        { "device": "pico_1", "pin": 4, "circuit": "board_ch1", "capacitor": "c3300" }
+    ]
+}

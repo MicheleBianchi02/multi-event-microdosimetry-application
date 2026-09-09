@@ -10,13 +10,16 @@ logger = logging.getLogger(__name__)
 class DataExporter:
     
     @staticmethod
-    def build_settings_dict(session_model, results_dict=None, analysis_meta=None):
+    def build_settings_dict(session_model, results_dict=None, analysis_meta=None, hardware_manager=None):
         """
         Builds the complete JSON dictionary based on the session model.
+        The hardware section is a snapshot of the loaded hardware config and
+        the values actually applied (gpio masks, ADC range) — read-only for
+        the offline analysis (B4/B6).
         """
         if results_dict is None:
             results_dict = {}
-            
+
         if analysis_meta is None:
             analysis_meta = {
                 "analysis_timestamp": None,
@@ -24,19 +27,44 @@ class DataExporter:
                 "rois_time_s": getattr(session_model, 'time_rois', []),
                 "rois_channel": getattr(session_model, 'rois', [])
             }
-            
+
+        manager = hardware_manager
+        loaded = manager is not None and manager.is_loaded
+
         # Optional: extract timestamps if they are available in session, else use current
         timestamp = datetime.now().astimezone().isoformat()
         t_start = getattr(session_model, 'timestamp_start', None) or timestamp
         t_end = getattr(session_model, 'timestamp_end', None) or timestamp
-            
+
+        if loaded:
+            adc = manager.get_adc_settings()
+            hardware_settings = {
+                "adc": {
+                    "bits": adc.get("bits"),
+                    "input_range_volts": adc.get("input_range_volts"),
+                },
+                "hardware_config_sha256": manager.config_sha256,
+                "hardware": manager.devices_summary(),
+            }
+        else:
+            hardware_settings = {}
+
+        channels_out = {}
+        for ch in ("ch1", "ch2"):
+            mask = getattr(session_model, f'gpio_mask_{ch}', None)
+            capacitance = getattr(session_model, f'capacitance_pf_{ch}', None)
+            if mask is not None or capacitance:
+                channels_out[ch] = {
+                    "gpio_mask": list(mask) if mask is not None else None,
+                    "capacitance_pF": capacitance,
+                }
+        hardware_settings["channels"] = channels_out
+        hardware_settings["single_channel_mode"] = not getattr(session_model, 'multiple_channel', True)
+
         settings = {
-            "file_format_version": "2.0",
+            "file_format_version": "3.0",
             "versions": {
                 "app_version": getattr(session_model, 'app_version', "v2.2.0"),
-                "firmware_version": getattr(session_model, 'firmware_version', "v1.4.2"), 
-                "hardware_id_ch1": getattr(session_model, 'hardware_id_ch1', "Unknown"),
-                "hardware_id_ch2": getattr(session_model, 'hardware_id_ch2', "Unknown")
             },
             "measurement_info": {
                 "timestamp_start": t_start,
@@ -55,21 +83,7 @@ class DataExporter:
                 "shift_note": getattr(session_model, 'shift_note', ""),
                 "measurement_note": getattr(session_model, 'measurement_note', "")
             },
-            "hardware_settings": {
-                "adc_num_bits": getattr(session_model, 'adc_num_bits', 16),
-                "adc_vref_volts": getattr(session_model, 'adc_vref_volts', 5.0),
-                "single_channel_mode": not getattr(session_model, 'multiple_channel', True),
-                "channels": {
-                    "ch1": {
-                        "capacitor_base_values_pF": getattr(session_model, 'capacitor_base_values_ch1', []),
-                        "capacitor_code": getattr(session_model, 'capacitor_code_ch1', "1000")
-                    },
-                    "ch2": {
-                        "capacitor_base_values_pF": getattr(session_model, 'capacitor_base_values_ch2', []),
-                        "capacitor_code": getattr(session_model, 'capacitor_code_ch2', "1000")
-                    }
-                }
-            },
+            "hardware_settings": hardware_settings,
             "timing_settings": {
                 "integration_time_s": getattr(session_model, 'int_time', 0.0),
                 "reset_time_s": getattr(session_model, 'reset_time', 0.0),
@@ -88,25 +102,35 @@ class DataExporter:
         return settings
 
     @staticmethod
-    def export_to_zip(session_model, temp_csv_path: str, zip_filepath: str, results_dict=None, analysis_meta=None) -> bool:
+    def export_to_zip(session_model, temp_csv_path: str, zip_filepath: str, results_dict=None, analysis_meta=None, hardware_manager=None, hardware_config_text=None, setup_json_text=None) -> bool:
         """
-        Takes the temporary CSV data and the session model, and bundles them into a zip file.
+        Bundles the CSV data, settings and (v3) verbatim copies of the
+        hardware config and campaign setup into a self-contained zip.
         """
         try:
-            settings_dict = DataExporter.build_settings_dict(session_model, results_dict, analysis_meta)
+            settings_dict = DataExporter.build_settings_dict(
+                session_model, results_dict, analysis_meta, hardware_manager
+            )
             settings_json = json.dumps(settings_dict, indent=4)
-            
+
             with zipfile.ZipFile(zip_filepath, 'w', zipfile.ZIP_DEFLATED) as zf:
                 # 1. Write the settings JSON
                 zf.writestr('settings.json', settings_json)
-                
+
                 # 2. Add the CSV file
                 if temp_csv_path and os.path.exists(temp_csv_path):
                     zf.write(temp_csv_path, 'data.csv')
                 else:
                     # If there's no temp file (e.g. testing), write an empty placeholder
                     zf.writestr('data.csv', 'timestamp,ch1,ch2\n')
-                    
+
+                # 3. Embed provenance: the exact hardware config and campaign
+                #    setup used for this run (absent in pre-3.0 archives)
+                if hardware_config_text:
+                    zf.writestr('hardware_config.json', hardware_config_text)
+                if setup_json_text:
+                    zf.writestr('setup.json', setup_json_text)
+
             return True
         except Exception as e:
             logger.exception("Failed to export to zip")

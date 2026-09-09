@@ -4,6 +4,7 @@ import time
 import serial
 
 from hardware.interfaces import IDataAcquisition, ITimingController, IGainController
+from hardware.config.schema import ParameterBounds, RampSamplingConfig, TimingCapability
 from core.constants import OVERFLOW_VALUE
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,19 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
     """
     Hardware communication for the Raspberry Pi Pico 2.
     """
+
+    # --- Hardcoded layer-1 limits (enforced on every call; the config's
+    # --- declared envelope is validated against these at load time) ---
+    DRIVER_CAPABILITIES = {"timing", "gain", "acquisition"}
+    GAIN_MAX_PINS = 3  # the capacitor command carries 3 bits
+    ADC_BITS = 12
+    HARDWARE_LIMITS = TimingCapability(
+        integration_time_us=ParameterBounds(1, 10_000_000, 1),
+        reset_time_us=ParameterBounds(1, 10_000_000, 1),
+        period_us=None,  # derived by the firmware: period = int + reset
+        ramp_sampling=RampSamplingConfig(True, dt_us=ParameterBounds(10, 10_000, 10)),
+    )
+
     def __init__(self, port: str = None, baud_rate: int = 115200):
         self._port = port
         self._baud_rate = baud_rate
@@ -91,28 +105,18 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
         logger.info("set_channels called but not implemented for Pico. Ignoring.")
         return True
 
-    @property
-    def num_gpios_per_channel(self) -> int:
-        return 1
-
-    def set_gpio_mask(self, channel: int, gpio_mask: list[bool]) -> bool:
+    def set_gpio_mask(self, gpio_mask: list[bool]) -> bool:
+        if len(gpio_mask) != self.GAIN_MAX_PINS or not all(isinstance(b, bool) for b in gpio_mask):
+            logger.error(
+                "set_gpio_mask rejected: expected %d boolean pin states, got %r",
+                self.GAIN_MAX_PINS, gpio_mask,
+            )
+            return False
         if not self.connect():
             return False
-            
-        if not hasattr(self, '_cap_state'):
-            self._cap_state = ['0', '0', '0']
-            self._ch1_mask_len = 0
-            
-        if channel == 1:
-            self._ch1_mask_len = min(3, len(gpio_mask))
-            for i in range(self._ch1_mask_len):
-                self._cap_state[i] = '1' if gpio_mask[i] else '0'
-        elif channel == 2:
-            offset = getattr(self, '_ch1_mask_len', 0)
-            for i in range(min(3 - offset, len(gpio_mask))):
-                self._cap_state[offset + i] = '1' if gpio_mask[i] else '0'
-        
-        cmd = f"C{self._cap_state[0]}{self._cap_state[1]}{self._cap_state[2]}\n".encode('ascii')
+
+        state = "".join("1" if b else "0" for b in gpio_mask)
+        cmd = f"C{state}\n".encode('ascii')
         
         response = bytes()
         operation_timeout = time.time() + self.timeout
@@ -126,28 +130,36 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
 
     @property
     def supports_ramp_sampling(self) -> bool:
-        return True
-        
-    def get_timing_limits(self) -> dict:
-        return {
-            'min_int_us': 1,
-            'max_int_us': 10000000,
-            'min_dt_us': 10
-        }
-        
+        return self.HARDWARE_LIMITS.ramp_sampling.supported
+
     def get_adc_settings(self) -> dict:
         return {
-            'bits': 12,
+            'bits': self.ADC_BITS,
             'vref': 5.0,
             'supports_oversampling': False
         }
 
-    def calculate_actual_timing(self, int_time_s: float, reset_time_s: float, debug_mode: bool = False, multiple_channel: bool = True) -> tuple[float, float]:
+    def _validate_timing_us(self, int_time_us: float, reset_time_us: float) -> bool:
+        limits = self.HARDWARE_LIMITS
+        ok = True
+        if not limits.integration_time_us.contains_value(int_time_us):
+            logger.error("integration time %s us out of hardware limits %s", int_time_us, limits.integration_time_us)
+            ok = False
+        if not limits.reset_time_us.contains_value(reset_time_us):
+            logger.error("reset time %s us out of hardware limits %s", reset_time_us, limits.reset_time_us)
+            ok = False
+        return ok
+
+    def calculate_actual_timing_us(
+        self, int_time_us: float, reset_time_us: float, debug_mode: bool = False, multiple_channel: bool = True
+    ) -> tuple[float, float]:
         # The Pico takes timings in physical units directly (microseconds)
         # So it does the math internally. We just return the same value.
-        return int_time_s, reset_time_s
+        return float(int_time_us), float(reset_time_us)
 
-    def configure_noramp(self, int_time_us: float, reset_time_us: float) -> bool:
+    def configure_noramp(self, int_time_us: float, reset_time_us: float, period_us: float = None) -> bool:
+        if not self._validate_timing_us(int_time_us, reset_time_us):
+            return False
         if not self.connect():
             return False
             
@@ -167,7 +179,13 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
                 response = self.serial.read(1)
         return self._check_response("D", response, "Configure noramp")
 
-    def configure_ramp(self, ramp_dt_us: float, int_time_us: float, reset_time_us: float) -> bool:
+    def configure_ramp(self, ramp_dt_us: float, int_time_us: float, reset_time_us: float, period_us: float = None) -> bool:
+        if not self._validate_timing_us(int_time_us, reset_time_us):
+            return False
+        dt_limits = self.HARDWARE_LIMITS.ramp_sampling.dt_us
+        if dt_limits is not None and not dt_limits.contains_value(ramp_dt_us):
+            logger.error("ramp dt %s us out of hardware limits %s", ramp_dt_us, dt_limits)
+            return False
         if not self.connect():
             return False
             

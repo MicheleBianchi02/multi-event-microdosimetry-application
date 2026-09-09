@@ -148,12 +148,18 @@ class MeasurementController(QObject):
                 "rois_channel": getattr(self.session, "rois", [])
             }
 
+            hardware_manager = self.hardware.hardware_manager
             success = DataExporter.export_to_zip(
                 session_model=self.session,
                 temp_csv_path=temp_csv,
                 zip_filepath=file_path,
                 results_dict=self.data_model.result,
-                analysis_meta=analysis_meta
+                analysis_meta=analysis_meta,
+                hardware_manager=hardware_manager,
+                hardware_config_text=(
+                    hardware_manager.config_text if hardware_manager.is_loaded else None
+                ),
+                setup_json_text=self._read_text(self._workspace_file("setup.json")),
             )
             
             if success:
@@ -164,10 +170,15 @@ class MeasurementController(QObject):
                 # Cleanup temp files if we saved online
                 if getattr(self.session, 'active_workspace_dir', None):
                     import os
-                    json_tmp = os.path.join(self.session.active_workspace_dir, ".active_run.json.tmp")
-                    csv_tmp = os.path.join(self.session.active_workspace_dir, ".active_run.csv.tmp")
-                    if os.path.exists(json_tmp): os.remove(json_tmp)
-                    if os.path.exists(csv_tmp): os.remove(csv_tmp)
+                    for tmp_name in (
+                        ".active_run.json.tmp",
+                        ".active_run.csv.tmp",
+                        ".active_run.hardware_config.json.tmp",
+                        ".active_run.setup.json.tmp",
+                    ):
+                        tmp = os.path.join(self.session.active_workspace_dir, tmp_name)
+                        if os.path.exists(tmp):
+                            os.remove(tmp)
                     
                 QMessageBox.information(self.main_window, "Success", "Measurement saved successfully.")
             else:
@@ -260,24 +271,23 @@ class MeasurementController(QObject):
                 self.session.shift_note = exp_setup.get("shift_note", getattr(self.session, "shift_note", ""))
                 self.session.measurement_note = exp_setup.get("measurement_note", getattr(self.session, "measurement_note", ""))
                 
-                hw_settings = settings.get("hardware_settings", {})
                 versions = settings.get("versions", {})
-                self.session.hardware_id_ch1 = versions.get("hardware_id_ch1", versions.get("hardware_id", getattr(self.session, "hardware_id_ch1", "")))
-                self.session.hardware_id_ch2 = versions.get("hardware_id_ch2", versions.get("hardware_id", getattr(self.session, "hardware_id_ch2", "")))
                 self.session.app_version = versions.get("app_version", getattr(self.session, "app_version", ""))
-                self.session.firmware_version = versions.get("firmware_version", getattr(self.session, "firmware_version", ""))
-                
-                self.session.adc_num_bits = hw_settings.get("adc_num_bits", getattr(self.session, "adc_num_bits", 12))
-                self.session.adc_vref_volts = hw_settings.get("adc_vref_volts", getattr(self.session, "adc_vref_volts", 5.0))
-                # single_event is not loaded from json
-                
+
+                # Applied hardware state (v3 archives): the gpio masks and
+                # total capacitances actually used (B4), read-only snapshot.
+                hw_settings = settings.get("hardware_settings", {})
                 ch1_settings = hw_settings.get("channels", {}).get("ch1", {})
                 ch2_settings = hw_settings.get("channels", {}).get("ch2", {})
-                self.session.capacitor_base_values_ch1 = ch1_settings.get("capacitor_base_values_pF", getattr(self.session, "capacitor_base_values_ch1", [22.0, 100.0, 560.0, 3000.0]))
-                self.session.capacitor_base_values_ch2 = ch2_settings.get("capacitor_base_values_pF", getattr(self.session, "capacitor_base_values_ch2", [22.0, 100.0, 560.0, 3000.0]))
-                self.session.capacitor_code_ch1 = ch1_settings.get("capacitor_code", getattr(self.session, "capacitor_code_ch1", "1000"))
-                self.session.capacitor_code_ch2 = ch2_settings.get("capacitor_code", getattr(self.session, "capacitor_code_ch2", "1000"))
-    
+                if ch1_settings.get("gpio_mask") is not None:
+                    self.session.gpio_mask_ch1 = ch1_settings["gpio_mask"]
+                if ch2_settings.get("gpio_mask") is not None:
+                    self.session.gpio_mask_ch2 = ch2_settings["gpio_mask"]
+                if ch1_settings.get("capacitance_pF") is not None:
+                    self.session.capacitance_pf_ch1 = ch1_settings["capacitance_pF"]
+                if ch2_settings.get("capacitance_pF") is not None:
+                    self.session.capacitance_pf_ch2 = ch2_settings["capacitance_pF"]
+                # single_event is not loaded from json
                 analysis = settings.get("analysis", {})
                 self.session.analysis_timestamp = analysis.get("analysis_timestamp", "")
                 self.session.rois = analysis.get("rois_channel") or []
@@ -341,6 +351,20 @@ class MeasurementController(QObject):
         except Exception as e:
             logger.exception("Failed to process loaded data")
             QMessageBox.warning(self.main_window, "Error", f"Failed to process data: {str(e)}")
+
+    def _workspace_file(self, name: str):
+        workspace = getattr(self.session, "active_workspace_dir", None)
+        return os.path.join(workspace, name) if workspace else None
+
+    @staticmethod
+    def _read_text(path):
+        if not path:
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return None
 
     def arm_device(self):
         """
@@ -415,12 +439,34 @@ class MeasurementController(QObject):
                 self._write_data_to_file_object(self._current_file, first_line)
                 self.running_view.already_saved = False # Not fully saved yet
                 
-                # Save a temporary JSON copy of settings for crash recovery
+                # Save a temporary JSON copy of settings for crash recovery,
+                # together with verbatim copies of the hardware config and
+                # campaign setup: a crashed run recovers with full provenance
                 from services.data_exporter import DataExporter
                 import json
                 json_path = os.path.join(self.session.active_workspace_dir, ".active_run.json.tmp")
                 with open(json_path, "w") as jf:
-                    json.dump(DataExporter.build_settings_dict(self.session), jf, indent=4)
+                    json.dump(
+                        DataExporter.build_settings_dict(
+                            self.session, hardware_manager=self.hardware.hardware_manager
+                        ),
+                        jf,
+                        indent=4,
+                    )
+                manager = self.hardware.hardware_manager
+                if manager is not None and manager.config_text:
+                    with open(
+                        os.path.join(self.session.active_workspace_dir, ".active_run.hardware_config.json.tmp"),
+                        "w",
+                    ) as hf:
+                        hf.write(manager.config_text)
+                setup_text = self._read_text(os.path.join(self.session.active_workspace_dir, "setup.json"))
+                if setup_text:
+                    with open(
+                        os.path.join(self.session.active_workspace_dir, ".active_run.setup.json.tmp"),
+                        "w",
+                    ) as sf:
+                        sf.write(setup_text)
                     
             except PermissionError:
                 QMessageBox.critical(self.main_window, "Error", "Permission denied: Cannot write to workspace location.")

@@ -21,25 +21,42 @@ def _load_zip(file_path: str) -> dict:
     with zipfile.ZipFile(file_path, 'r') as zf:
         settings_path = None
         data_path = None
+        hardware_config_path = None
+        setup_path = None
         for name in zf.namelist():
             # Allow matching settings.json in a subfolder (like when compressed by GNOME)
             if name.endswith("settings.json"):
                 settings_path = name
             elif name.endswith("data.csv"):
                 data_path = name
-                
+            elif name.endswith("hardware_config.json"):
+                hardware_config_path = name
+            elif name.endswith("setup.json"):
+                setup_path = name
+
         if not settings_path:
             raise KeyError("There is no settings.json in the archive")
         if not data_path:
             raise KeyError("There is no data.csv in the archive")
-            
+
         with zf.open(settings_path) as f:
             settings = json.load(f)
-            
+
+        # v3 archives embed the hardware config (and campaign setup) used for
+        # the run, so they can be interpreted without any external file
+        embedded = {}
+        if hardware_config_path is not None:
+            with zf.open(hardware_config_path) as f:
+                embedded["hardware_config"] = f.read().decode("utf-8")
+        if setup_path is not None:
+            with zf.open(setup_path) as f:
+                embedded["setup"] = f.read().decode("utf-8")
+
         with zf.open(data_path) as f:
             first_line = f.readline().decode('utf-8').strip()
             result = _parse_csv_content(f, first_line)
             result["settings"] = settings
+            result["embedded"] = embedded
             return result
 
 def _load_csv(file_path: str) -> dict:

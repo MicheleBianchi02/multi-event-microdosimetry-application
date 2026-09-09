@@ -20,6 +20,7 @@ class SettingWindow(QWidget):
     port_changed = pyqtSignal()
     ports_refresh_requested = pyqtSignal()
     simulate_requested = pyqtSignal()
+    load_config_requested = pyqtSignal()
 
     connect_requested = pyqtSignal(str, str)
 
@@ -86,6 +87,13 @@ class SettingWindow(QWidget):
         self.port_table.itemSelectionChanged.connect(self.on_selection_changed)
 
         # --- Buttons ---
+        self.load_config_btn = QPushButton(" Load Hardware Config…")
+        self.load_config_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.load_config_btn.clicked.connect(self.load_config_requested.emit)
+        self.load_config_btn.setStyleSheet(
+            "padding: 6px 10px; font-size: 11pt; background-color: #6f42c1; color: white; border-radius: 4px; font-weight: bold;"
+        )
+
         self.simulate_btn = QPushButton(" Simulate")
         self.simulate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.simulate_btn.clicked.connect(self.simulate_requested.emit)
@@ -166,6 +174,7 @@ class SettingWindow(QWidget):
 
         # Toolbar (Refresh button and Simulate button)
         toolbar = QHBoxLayout()
+        toolbar.addWidget(self.load_config_btn)
         toolbar.addWidget(self.simulate_btn)
         toolbar.addStretch(1)
         toolbar.addWidget(self.refresh_btn)
@@ -196,6 +205,13 @@ class SettingWindow(QWidget):
         master.addStretch(0)
 
         # The controller provides the initial port list after signals are bound.
+
+    def reload_devices(self):
+        """Repopulate the device mapping after a hardware config load/unload."""
+        self.dev_id_combo.clear()
+        if self.hardware_manager:
+            for dev_id in self.hardware_manager.devices.keys():
+                self.dev_id_combo.addItem(dev_id)
 
     def fill_port_table(self, port_list: list[dict[str, str]]):
         self.port_table.setRowCount(0)  # Clear existing
@@ -299,7 +315,9 @@ class SettingWindow(QWidget):
         self.refresh_btn.setEnabled(False)
 
         dev_id = self.dev_id_combo.currentText()
-        self.connect_requested.emit(dev_id, self.selected_port)
+        # selected_device is the full path (e.g. /dev/ttyACM0); fall back to
+        # the name on platforms where they coincide (B3)
+        self.connect_requested.emit(dev_id, self.selected_device or self.selected_port)
 
     def on_connection_result(self, success: bool, message: str = ""):
         self.status_frame.setVisible(True)

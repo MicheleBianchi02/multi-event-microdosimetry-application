@@ -2,15 +2,14 @@ import json
 
 from PyQt6.QtWidgets import (
     QDialog,
-    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -18,9 +17,10 @@ from PyQt6.QtWidgets import (
 
 
 class InfoDialog(QDialog):
-    def __init__(self, session_model, parent=None):
+    def __init__(self, session_model, hardware_manager=None, parent=None):
         super().__init__(parent)
         self.session = session_model
+        self.hardware_manager = hardware_manager
         self.setWindowTitle("Measurement Info")
         self.resize(600, 800)
         self.init_ui()
@@ -42,49 +42,28 @@ class InfoDialog(QDialog):
         ws_form = QFormLayout(ws_group)
 
         self.app_version_input = QLineEdit()
-        self.fw_version_input = QLineEdit()
-        self.hardware_id_ch1_input = QLineEdit()
-        self.hardware_id_ch2_input = QLineEdit()
+        self.app_version_input.setReadOnly(True)
         self.facility_input = QLineEdit()
         self.beam_type_input = QLineEdit()
 
-        self.adc_bits_input = QSpinBox()
-        self.adc_bits_input.setRange(8, 32)
-
-        self.adc_vref_input = QDoubleSpinBox()
-        self.adc_vref_input.setRange(1.0, 10.0)
-        self.adc_vref_input.setDecimals(2)
-        self.adc_vref_input.setSingleStep(0.1)
-
-        self.ch1_caps_input = QLineEdit()
-        self.ch2_caps_input = QLineEdit()
+        # Hardware identity is a snapshot of what the loaded hardware config
+        # produced this measurement: displayed, not edited here.
+        self.hardware_summary_label = QLabel()
+        self.hardware_summary_label.setStyleSheet("color: #555;")
+        self.hardware_summary_label.setWordWrap(True)
 
         self.shift_note_input = QTextEdit()
         self.shift_note_input.setMaximumHeight(60)
 
         # Connect signals
-        self.app_version_input.textEdited.connect(self.on_ws_edit)
-        self.fw_version_input.textEdited.connect(self.on_ws_edit)
-        self.hardware_id_ch1_input.textEdited.connect(self.on_ws_edit)
-        self.hardware_id_ch2_input.textEdited.connect(self.on_ws_edit)
         self.facility_input.textEdited.connect(self.on_ws_edit)
         self.beam_type_input.textEdited.connect(self.on_ws_edit)
-        self.adc_bits_input.valueChanged.connect(self.on_ws_edit)
-        self.adc_vref_input.valueChanged.connect(self.on_ws_edit)
-        self.ch1_caps_input.textEdited.connect(self.on_ws_edit)
-        self.ch2_caps_input.textEdited.connect(self.on_ws_edit)
         self.shift_note_input.textChanged.connect(self.on_ws_edit)
 
         ws_form.addRow("App Ver:", self.app_version_input)
-        ws_form.addRow("Firmware Ver:", self.fw_version_input)
-        ws_form.addRow("HW ID CH1:", self.hardware_id_ch1_input)
-        ws_form.addRow("HW ID CH2:", self.hardware_id_ch2_input)
         ws_form.addRow("Facility:", self.facility_input)
         ws_form.addRow("Beam Type:", self.beam_type_input)
-        ws_form.addRow("ADC Num Bits:", self.adc_bits_input)
-        ws_form.addRow("ADC VRef (V):", self.adc_vref_input)
-        ws_form.addRow("CH1 Caps (pF):", self.ch1_caps_input)
-        ws_form.addRow("CH2 Caps (pF):", self.ch2_caps_input)
+        ws_form.addRow("Hardware:", self.hardware_summary_label)
         ws_form.addRow("Shift Note:", self.shift_note_input)
 
         layout.addWidget(ws_group)
@@ -100,14 +79,12 @@ class InfoDialog(QDialog):
         self.det_voltage_input = QLineEdit()
         self.depth_input = QLineEdit()
 
-        from PyQt6.QtCore import QRegularExpression
-        from PyQt6.QtGui import QRegularExpressionValidator
-
-        binary_validator = QRegularExpressionValidator(QRegularExpression("[01]*"))
-        self.ch1_cap_code_input = QLineEdit()
-        self.ch1_cap_code_input.setValidator(binary_validator)
-        self.ch2_cap_code_input = QLineEdit()
-        self.ch2_cap_code_input.setValidator(binary_validator)
+        # Applied gain: read-only snapshot (chosen in the wizard, applied to
+        # the hardware before the measurement started)
+        self.ch1_gain_label = QLabel()
+        self.ch1_gain_label.setStyleSheet("color: #555;")
+        self.ch2_gain_label = QLabel()
+        self.ch2_gain_label.setStyleSheet("color: #555;")
 
         self.meas_note_input = QTextEdit()
         self.meas_note_input.setMaximumHeight(60)
@@ -122,8 +99,6 @@ class InfoDialog(QDialog):
             self.beam_current_input,
             self.det_voltage_input,
             self.depth_input,
-            self.ch1_cap_code_input,
-            self.ch2_cap_code_input,
         ]:
             w.textEdited.connect(self.on_meta_edit)
         self.meas_note_input.textChanged.connect(self.on_meta_edit)
@@ -132,8 +107,8 @@ class InfoDialog(QDialog):
         meta_form.addRow("Beam Current (nA):", self.beam_current_input)
         meta_form.addRow("Detector Voltage (V):", self.det_voltage_input)
         meta_form.addRow("Depth (cm):", self.depth_input)
-        meta_form.addRow("CH1 Cap Code (binary):", self.ch1_cap_code_input)
-        meta_form.addRow("CH2 Cap Code (binary):", self.ch2_cap_code_input)
+        meta_form.addRow("CH1 Gain:", self.ch1_gain_label)
+        meta_form.addRow("CH2 Gain:", self.ch2_gain_label)
         meta_form.addRow("Problematic Measurement:", self.is_problematic_input)
         meta_form.addRow("Measurement Note:", self.meas_note_input)
 
@@ -145,7 +120,6 @@ class InfoDialog(QDialog):
         info_group = QGroupBox("Read-Only Information")
         info_form = QFormLayout(info_group)
         
-        from PyQt6.QtWidgets import QLabel
         self.filename_label = QLabel()
         self.filename_label.setStyleSheet("color: #555;")
         self.single_channel_label = QLabel()
@@ -177,26 +151,31 @@ class InfoDialog(QDialog):
         btn_layout.addWidget(close_btn)
         main_layout.addLayout(btn_layout)
 
+    def _gain_text(self, gpio_mask, capacitance):
+        if gpio_mask is None:
+            return "N/A"
+        bits = "".join("1" if b else "0" for b in gpio_mask)
+        c = f" ({capacitance:g} pF)" if capacitance else ""
+        return f"mask {bits}{c}"
+
     def populate_fields(self):
         self.blockSignals(True)
         # Workspace
         self.app_version_input.setText(self.session.app_version)
-        self.fw_version_input.setText(self.session.firmware_version)
-        self.hardware_id_ch1_input.setText(self.session.hardware_id_ch1)
-        self.hardware_id_ch2_input.setText(self.session.hardware_id_ch2)
         self.facility_input.setText(self.session.facility)
         self.beam_type_input.setText(self.session.beam_type)
 
-        self.adc_bits_input.blockSignals(True)
-        self.adc_bits_input.setValue(self.session.adc_num_bits)
-        self.adc_bits_input.blockSignals(False)
+        manager = getattr(self, "hardware_manager", None)
+        if manager is not None and manager.is_loaded:
+            summary = manager.devices_summary()
+            devices = ", ".join(
+                f"{dev['name']} [{dev['driver']}]"
+                for dev in summary.get("devices", {}).values()
+            )
+            self.hardware_summary_label.setText(devices or "N/A")
+        else:
+            self.hardware_summary_label.setText("no hardware config loaded")
 
-        self.adc_vref_input.blockSignals(True)
-        self.adc_vref_input.setValue(self.session.adc_vref_volts)
-        self.adc_vref_input.blockSignals(False)
-
-        self.ch1_caps_input.setText(json.dumps(self.session.capacitor_base_values_ch1))
-        self.ch2_caps_input.setText(json.dumps(self.session.capacitor_base_values_ch2))
         self.shift_note_input.setPlainText(self.session.shift_note)
         self.blockSignals(False)
 
@@ -205,8 +184,12 @@ class InfoDialog(QDialog):
         self.beam_current_input.setText(str(self.session.beam_current_na))
         self.det_voltage_input.setText(str(self.session.detector_voltage_v))
         self.depth_input.setText(str(self.session.depth_cm))
-        self.ch1_cap_code_input.setText(self.session.capacitor_code_ch1)
-        self.ch2_cap_code_input.setText(self.session.capacitor_code_ch2)
+        self.ch1_gain_label.setText(
+            self._gain_text(self.session.gpio_mask_ch1, getattr(self.session, "capacitance_pf_ch1", None))
+        )
+        self.ch2_gain_label.setText(
+            self._gain_text(self.session.gpio_mask_ch2, getattr(self.session, "capacitance_pf_ch2", None))
+        )
 
         self.is_problematic_input.blockSignals(True)
         self.is_problematic_input.setChecked(
@@ -237,29 +220,9 @@ class InfoDialog(QDialog):
         self.timestamp_end_label.setText(str(end_ts) if end_ts else "N/A")
 
     def on_ws_edit(self):
-        self.session.app_version = self.app_version_input.text()
-        self.session.firmware_version = self.fw_version_input.text()
-        self.session.hardware_id_ch1 = self.hardware_id_ch1_input.text()
-        self.session.hardware_id_ch2 = self.hardware_id_ch2_input.text()
         self.session.facility = self.facility_input.text()
         self.session.beam_type = self.beam_type_input.text()
-        self.session.adc_num_bits = self.adc_bits_input.value()
-        self.session.adc_vref_volts = self.adc_vref_input.value()
         self.session.shift_note = self.shift_note_input.toPlainText()
-
-        try:
-            ch1_vals = json.loads(self.ch1_caps_input.text())
-            if isinstance(ch1_vals, list):
-                self.session.capacitor_base_values_ch1 = ch1_vals
-        except json.JSONDecodeError:
-            pass
-
-        try:
-            ch2_vals = json.loads(self.ch2_caps_input.text())
-            if isinstance(ch2_vals, list):
-                self.session.capacitor_base_values_ch2 = ch2_vals
-        except json.JSONDecodeError:
-            pass
 
     def on_meta_edit(self):
         try:
@@ -284,7 +247,5 @@ class InfoDialog(QDialog):
         except ValueError:
             pass
 
-        self.session.capacitor_code_ch1 = self.ch1_cap_code_input.text()
-        self.session.capacitor_code_ch2 = self.ch2_cap_code_input.text()
         self.session.is_problematic = self.is_problematic_input.isChecked()
         self.session.measurement_note = self.meas_note_input.toPlainText()

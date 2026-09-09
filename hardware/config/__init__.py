@@ -1,0 +1,64 @@
+"""
+Hardware configuration: typed schema, loader/validator, gain table model.
+"""
+from hardware.config.schema import (
+    AcquisitionCapability,
+    AdcCapability,
+    CapacitorConfig,
+    ChannelConfig,
+    CircuitConfig,
+    ConnectionConfig,
+    DeviceConfig,
+    DriverDescriptor,
+    FixedValue,
+    GainCapability,
+    HardwareConfig,
+    ParameterBounds,
+    PinId,
+    RampSamplingConfig,
+    RolesConfig,
+    TimingCapability,
+    VoltageRange,
+)
+from hardware.config.loader import (
+    ConfigValidationError,
+    file_sha256,
+    hardware_config_from_dict,
+    load_hardware_config,
+)
+from hardware.config.gain_model import (
+    ChannelGainModel,
+    GainOption,
+    build_channel_gain_model,
+    channels_share_gain_device,
+    combined_pin_states,
+)
+
+__all__ = [
+    "AcquisitionCapability",
+    "AdcCapability",
+    "CapacitorConfig",
+    "ChannelConfig",
+    "CircuitConfig",
+    "ConfigValidationError",
+    "ConnectionConfig",
+    "DeviceConfig",
+    "DriverDescriptor",
+    "FixedValue",
+    "GainCapability",
+    "GainOption",
+    "ChannelGainModel",
+    "HardwareConfig",
+    "ParameterBounds",
+    "PinId",
+    "RampSamplingConfig",
+    "RolesConfig",
+    "TimingCapability",
+    "VoltageRange",
+    "build_channel_gain_model",
+    "channels_share_gain_device",
+    "combined_pin_states",
+    "file_sha256",
+    "hardware_config_from_dict",
+    "load_hardware_config",
+]

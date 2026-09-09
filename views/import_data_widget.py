@@ -222,18 +222,39 @@ class ImportDataWidget(QWidget):
         exp = setup_data.get("experimental_setup", {})
         hw = setup_data.get("hardware_settings", {})
         ver = setup_data.get("versions", {})
+        hardware_link = setup_data.get("hardware", {})
+
+        adc = hw.get("adc", {})
+        ch1 = hw.get("channels", {}).get("ch1", {})
+        ch2 = hw.get("channels", {}).get("ch2", {})
 
         info = [
             ("App Version:", ver.get("app_version", "N/A")),
-            ("Firmware Version:", ver.get("firmware_version", "N/A")),
-            ("HW ID CH1:", ver.get("hardware_id_ch1", ver.get("hardware_id", "N/A"))),
-            ("HW ID CH2:", ver.get("hardware_id_ch2", ver.get("hardware_id", "N/A"))),
             ("Facility:", exp.get("facility", "N/A")),
             ("Beam Type:", exp.get("beam_type", "N/A")),
-            ("ADC Bits:", hw.get("adc_num_bits", "N/A")),
-            ("ADC VRef:", f"{hw.get('adc_vref_volts', 'N/A')} V"),
-            ("CH1 Caps (pF):", hw.get("channels", {}).get("ch1", {}).get("capacitor_base_values_pF", "N/A")),
-            ("CH2 Caps (pF):", hw.get("channels", {}).get("ch2", {}).get("capacitor_base_values_pF", "N/A")),
+            ("ADC Bits:", adc.get("bits", hw.get("adc_num_bits", "N/A"))),
+            (
+                "ADC Range:",
+                adc.get("input_range_volts") and (
+                    f"{adc['input_range_volts'].get('min_volts', 'N/A')} … "
+                    f"{adc['input_range_volts'].get('max_volts', 'N/A')} V"
+                ),
+            ),
+            (
+                "CH1 Gain:",
+                ch1.get("capacitance_pF") and f"{ch1['capacitance_pF']:g} pF"
+                or hw.get("channels", {}).get("ch1", {}).get("capacitor_base_values_pF", "N/A"),
+            ),
+            (
+                "CH2 Gain:",
+                ch2.get("capacitance_pF") and f"{ch2['capacitance_pF']:g} pF"
+                or hw.get("channels", {}).get("ch2", {}).get("capacitor_base_values_pF", "N/A"),
+            ),
+            (
+                "Hardware Config:",
+                hardware_link.get("config_file", "N/A")
+                + (f" (sha {hardware_link['config_sha256'][:8]}…)" if hardware_link.get("config_sha256") else ""),
+            ),
             ("Shift Note:", exp.get("shift_note", "None") or "None"),
         ]
 

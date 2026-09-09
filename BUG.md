@@ -32,7 +32,7 @@ Severity scale:
   now means only overflow or (debug mode) a negative start→stop difference.
   Regression tests: `models/test_data_model.py`.
 
-### B2 — Connection failures are always reported as success
+### B2 — Connection failures are always reported as success — **PARTIALLY FIXED**
 - **Intended:** connection is driven by the loaded hardware configuration JSON.
   On Linux each device gets a persistent name via a udev rule — one rule per
   device (four in the general case: timing µC, two gain µCs, readout system);
@@ -53,8 +53,13 @@ Severity scale:
 - **Fix direction:** `return failed` in `connect_all`; implement the JSON-driven
   auto-connect and the per-device manual-connect dialog; extend the udev rules to
   one per device; decide the fate of `verify_connection`.
+- **Partially fixed (2026-09-09):** `connect_all` now returns the failed device
+  list (failures are reported), and connection is driven by the validated
+  hardware config (loaded explicitly or via the workspace). Still open: the
+  per-device manual-connect dialog for partial setups (the current dialog maps
+  one port at a time) and one-udev-rule-per-device.
 
-### B3 — Manual port mapping passes the port name instead of the device path
+### B3 — Manual port mapping passes the port name instead of the device path — **FIXED**
 - **Intended:** from the manual-connect dialog (see B2), mapping a configured
   device to a serial port connects to that port.
 - **Current:** `SettingWindow` stores both the name (e.g. `ttyACM0`) and the device
@@ -67,8 +72,10 @@ Severity scale:
   where they coincide).
 
 ## MEDIUM
+- **Fixed (2026-09-09):** the connect request now emits the selected device path
+  (falling back to the port name when they coincide).
 
-### B4 — Selected gain is not persisted in the measurement archive
+### B4 — Selected gain is not persisted in the measurement archive — **FIXED**
 - **Intended:** `settings.json` stores, per channel, the applied GPIO mask and the
   total capacitance; loading a measurement restores them.
 - **Current:** `DataExporter.build_settings_dict` exports `capacitor_code_ch1/2`,
@@ -79,8 +86,12 @@ Severity scale:
   charge-axis scaling silently uses the current session value (default 100 pF).
 - **Fix direction:** export `gpio_mask` + `capacitance_pF` per channel and restore
   them on load.
+- **Fixed (2026-09-09):** with the archive v3 format, `settings.json` stores per
+  channel the applied `gpio_mask` and total `capacitance_pF`, taken from the
+  gain tables derived from the hardware config; loading a measurement restores
+  them. The old `capacitor_code` fields are gone.
 
-### B5 — SE/ME command routed to the acquisition device instead of both gain controllers
+### B5 — SE/ME command routed to the acquisition device instead of both gain controllers — **FIXED**
 - **Intended:** the SE/ME line belongs to the gain controllers; switching mode
   calls `set_event_mode` on **both** `gain_ch1` and `gain_ch2`, so both electronics
   receive the signal. `set_event_mode` is part of the `IGainController` contract.
@@ -92,8 +103,11 @@ Severity scale:
 - **Fix direction:** move `set_event_mode` into `IGainController`; call it on both
   gain controllers. Future extension: per-channel event mode (ME on one detector,
   SE on the other).
+- **Fixed (2026-09-09):** `set_event_mode` is part of `IGainController` and the
+  mode switch goes through `HardwareManager.set_event_mode`, which calls it on
+  every assigned gain controller.
 
-### B6 — ADC bit depth is hardcoded; should come from the acquisition interface
+### B6 — ADC bit depth is hardcoded; should come from the acquisition interface — **PARTIALLY FIXED**
 - **Intended:** the number of ADC bits (and everything derived from it: histogram
   bins, overflow sentinel, sample validation) is dynamic and provided by
   `IDataAcquisition.get_adc_settings()`.
@@ -106,8 +120,14 @@ Severity scale:
   treated as overflow (→ NaN on load).
 - **Fix direction:** derive bins/sentinel from the acquisition device settings at
   session start; keep a serialized value in the archives for offline loading.
+- **Partially fixed (2026-09-09):** the ADC bits and input range now come from
+  `hardware_config.json` (validated against the driver), flow through
+  `HardwareManager.get_adc_settings()` and are recorded per measurement in the
+  archive. Still hardcoded: `DataModel`'s histogram bins / overflow sentinel
+  remain fixed at 12 bit — deriving them dynamically at session start is the
+  remaining work.
 
-### B7 — Gain table is not constrained by the controller's GPIO capability
+### B7 — Gain table is not constrained by the controller's GPIO capability — **FIXED**
 - **Intended:** the offered gain combinations depend both on the circuit (which
   capacitors exist) and on the µC (`num_gpios_per_channel`): a µC with fewer GPIOs
   than the circuit's switchable capacitors must offer only the combinations it can
@@ -119,8 +139,12 @@ Severity scale:
 - **Fix direction:** clip/validate the combination table against the gain
   controller's declared GPIO count (also used by the future GPIO→capacitor
   mapping, see README §6).
+- **Fixed (2026-09-09):** the gain tables are derived from the config's
+  `connections` (pin → capacitor edges); a capacitor without a driving pin, or a
+  pin not declared for the gain device, is a load error. A µC with fewer pins
+  than the circuit's capacitors can no longer produce an undrivable table.
 
-### B8 — Dual-channel UI offered with hardware that acquires one channel only
+### B8 — Dual-channel UI offered with hardware that acquires one channel only — **FIXED**
 - **Intended:** the channel selection reflects what the acquisition system can
   actually read (or warns).
 - **Current:** the Pico reader fills CH2 with the overflow sentinel in both
@@ -133,17 +157,27 @@ Severity scale:
   `get_adc_settings()`) and gate the single/dual-channel choice on it.
 
 ## LOW
+- **Fixed (2026-09-09):** the acquisition capability declares `num_channels`;
+  the config validator rejects files with more active channels than the
+  acquisition device can measure, and the wizard disables the dual-channel
+  choice when `max_channels < 2`.
 
-### B9 — `PICSerialDAQ.configure_ramp` is defined twice; the surviving one returns success
+### B9 — `PICSerialDAQ.configure_ramp` is defined twice; the surviving one returns success — **FIXED**
 - `hardware/pic/pic_daq.py:171` returns `False` (unsupported), but the second
   definition at `:264` overrides it and returns `True` "Ignoring". Direct calls
   would report success while doing nothing. Currently unreachable from the UI
   (ramp checkbox hidden for `supports_ramp_sampling = False`).
+- **Fixed (2026-09-09):** the duplicate definition is gone; `configure_ramp`
+  on the PIC returns `False` (unsupported).
 
-### B10 — `PicoSerialDAQ.num_gpios_per_channel` returns 1, contradicting its own protocol
+### B10 — `PicoSerialDAQ.num_gpios_per_channel` returns 1, contradicting its own protocol — **FIXED**
 - The Pico gain command drives 3 bits and `set_gpio_mask` handles 3 bits
   (`hardware/pico/pico_daq.py:94-96` vs `:98-125`). Dead code today (see B7) but
   wrong the moment it is used.
+- **Fixed (2026-09-09):** `num_gpios_per_channel` is removed from the interface
+  and the drivers; the pin count comes from the device's declared `gain.pins`
+  in the hardware config (3 for the Pico, 1 for the PIC), validated against the
+  driver's `GAIN_MAX_PINS` at config load.
 
 ### B11 — Version/name strings inconsistent
 - Intended app identity: **ATOMIQA 3.0**. Currently `APP_VERSION = "v2.2.0"`
@@ -151,11 +185,14 @@ Severity scale:
   `settings.json`), `pyproject.toml` says `ATOMIQA 1.5`, and the PyInstaller bundle
   is named `MicroDosimeter` (`build.py`).
 
-### B12 — Default capacitor base values disagree with the shipped config
+### B12 — Default capacitor base values disagree with the shipped config — **FIXED**
 - `SessionModel`/`ShiftService` default to `[22, 100, 560, 3000]` pF
   (`models/session_model.py:56-57`) while `hardware_config.json` uses 3300 pF for
   the largest switchable capacitor. Informational field only, but invites wrong
   analysis inputs when no workspace is loaded.
+- **Fixed (2026-09-09):** the capacitor/ADC defaults are gone from
+  `SessionModel`/`ShiftService`/`setup.json` — the hardware config is the single
+  source of truth and every applied value is recorded per measurement.
 
 ### B13 — Frozen build resolves config/data paths against the CWD
 - `hardware_config.json` and `data/pristine` are opened with relative paths
@@ -176,13 +213,17 @@ Severity scale:
   `result["stop_value"]` (`core/load_file.py:98`). Cosmetic inconsistency between
   live and reloaded debug sessions.
 
-### B16 — Pico gain state cache assumes CH1 is always configured before CH2
+### B16 — Pico gain state cache assumes CH1 is always configured before CH2 — **FIXED**
 - `set_gpio_mask` offsets CH2's bits past `_ch1_mask_len`
   (`hardware/pico/pico_daq.py:106-113`); if CH2 were applied first it would land
   on bits 0-2 and be overwritten by CH1 later. `send_timing_config` happens to
   apply CH1 first, so this works today, but the coupling is fragile.
+- **Fixed (2026-09-09):** `set_gpio_mask` is device-centric (one bool per
+  declared pin, full state per call); the per-channel/per-bit offset cache is
+  gone. The manager merges both channels' selections into a per-device pin
+  state, so the call order no longer matters.
 
-### B17 — Dead code and housekeeping
+### B17 — Dead code and housekeeping — **PARTIALLY FIXED**
 - Superseded pre-refactor drivers still in the tree: `services/daq_interface.py`,
   `services/pico_serial_daq.py`, `services/pic_serial_daq.py` (not imported
   anywhere), and `core/timing.py` (timing math moved into the PIC driver).
@@ -195,3 +236,8 @@ Severity scale:
   (`controllers/measurement_controller.py:674`) that disables the auto-update of
   analysis results inside a saved ZIP (`DataExporter.update_analysis_in_zip`).
 - Duplicated `setCheckable(True)` calls in `views/mode_window.py:37-38,55-56`.
+- **Partially fixed (2026-09-09):** `ITimingController.get_timing_limits()` (never
+  called) is removed — drivers expose hardcoded limits via `HARDWARE_LIMITS` /
+  the registry, and the UI uses the declared envelope from the config. The
+  superseded drivers in `services/`, the unused ACF/PACF and the `if False:`
+  block remain to be cleaned up.

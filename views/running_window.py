@@ -2182,7 +2182,7 @@ class RunningWindow(QWidget):
         self.start_bnt.setEnabled(enable)
 
     def on_edit_info(self):
-        dialog = InfoDialog(self.session, self)
+        dialog = InfoDialog(self.session, self.hardware_manager, self)
         dialog.exec()
 
     def update_after_load(self, elapsed_time: float):

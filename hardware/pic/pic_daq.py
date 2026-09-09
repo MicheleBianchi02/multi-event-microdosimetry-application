@@ -6,6 +6,7 @@ import serial.tools.list_ports
 import numpy as np
 
 from hardware.interfaces import IDataAcquisition, ITimingController, IGainController
+from hardware.config.schema import ParameterBounds, RampSamplingConfig, TimingCapability
 from core.constants import OVERFLOW_VALUE
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,19 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
     """
     Hardware communication using a Serial Port for the PIC microcontroller.
     """
+
+    # --- Hardcoded layer-1 limits (enforced on every call; the config's
+    # --- declared envelope is validated against these at load time) ---
+    DRIVER_CAPABILITIES = {"timing", "gain", "acquisition"}
+    GAIN_MAX_PINS = 1  # single 'C' Y/N capacitor command
+    ADC_BITS = 12
+    HARDWARE_LIMITS = TimingCapability(
+        integration_time_us=ParameterBounds(1, 512_000_000, 1),
+        reset_time_us=ParameterBounds(1, 512_000_000, 1),
+        period_us=None,  # derived by the firmware: period = int + reset
+        ramp_sampling=RampSamplingConfig(False),  # no ramp trigger support
+    )
+
     def __init__(self, port: str = None, baud_rate: int = 115200):
         self._port = port
         self._baud_rate = baud_rate
@@ -119,20 +133,21 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
                 response = self.serial.read(1)
         return self._check_response("D", response, "Changing channels")
 
-    @property
-    def num_gpios_per_channel(self) -> int:
-        return 1
-
-    def set_gpio_mask(self, channel: int, gpio_mask: list[bool]) -> bool:
+    def set_gpio_mask(self, gpio_mask: list[bool]) -> bool:
+        if len(gpio_mask) != self.GAIN_MAX_PINS or not all(isinstance(b, bool) for b in gpio_mask):
+            logger.error(
+                "set_gpio_mask rejected: expected %d boolean pin state(s), got %r",
+                self.GAIN_MAX_PINS, gpio_mask,
+            )
+            return False
         if not self.connect():
             return False
         response = bytes()
         operation_timeout = time.time() + self.timeout
-        
-        # PIC only supports 1 GPIO via 'C' 'Y'/'N' command.
-        # It doesn't specify channel in the legacy protocol.
-        cap0 = gpio_mask[0] if len(gpio_mask) > 0 else False
-        
+
+        # PIC drives a single GPIO via the 'C' 'Y'/'N' command.
+        cap0 = gpio_mask[0]
+
         with self._lock:
             self.serial.reset_input_buffer()
             self.serial.write(b"C")
@@ -152,27 +167,41 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
             return TX_DELAY_DEBUG_SINGLE if debug_mode else TX_DELAY_PRO_SINGLE
     @property
     def supports_ramp_sampling(self) -> bool:
-        return False
-        
-    def get_timing_limits(self) -> dict:
-        return {
-            'min_int_us': 1,
-            'max_int_us': 512000000, # Approx 512 seconds max
-            'min_dt_us': 1000 # Doesn't support ramp, so dt doesn't matter
-        }
-        
+        return self.HARDWARE_LIMITS.ramp_sampling.supported
+
     def get_adc_settings(self) -> dict:
         return {
-            'bits': 12,
+            'bits': self.ADC_BITS,
             'vref': 5.0,
             'supports_oversampling': False
         }
 
-    def configure_ramp(self, ramp_dt_us: float, int_time_us: float, reset_time_us: float) -> bool:
+    def configure_ramp(self, ramp_dt_us: float, int_time_us: float, reset_time_us: float, period_us: float = None) -> bool:
         logger.warning("PIC does not support ramp sampling")
         return False
 
-    def calculate_actual_timing(self, int_time_s: float, reset_time_s: float, debug_mode: bool = False, multiple_channel: bool = True) -> tuple[float, float]:
+    def _validate_timing_us(self, int_time_us: float, reset_time_us: float) -> bool:
+        limits = self.HARDWARE_LIMITS
+        ok = True
+        if not limits.integration_time_us.contains_value(int_time_us):
+            logger.error("integration time %s us out of hardware limits %s", int_time_us, limits.integration_time_us)
+            ok = False
+        if not limits.reset_time_us.contains_value(reset_time_us):
+            logger.error("reset time %s us out of hardware limits %s", reset_time_us, limits.reset_time_us)
+            ok = False
+        return ok
+
+    def calculate_actual_timing_us(
+        self, int_time_us: float, reset_time_us: float, debug_mode: bool = False, multiple_channel: bool = True
+    ) -> tuple[float, float]:
+        """PIC quantization math (timer search over u/tmr bins); µs in, µs out."""
+        if not self._validate_timing_us(int_time_us, reset_time_us):
+            return float(int_time_us), float(reset_time_us)
+        return self._quantize_timing(int_time_us, reset_time_us, debug_mode, multiple_channel)
+
+    def _quantize_timing(self, int_time_us: float, reset_time_us: float, debug_mode: bool, multiple_channel: bool) -> tuple[float, float]:
+        int_time_s = int_time_us / 1e6
+        reset_time_s = reset_time_us / 1e6
         if int_time_s <= 0:
             int_time_s = 1e-6
             
@@ -221,14 +250,16 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
             timerL_rst = bytes([bin_value & 0xFF])
 
         self._last_timer_params = (timerU_int, timerH_int, timerL_int, timerH_rst, timerL_rst)
-        return act_int_time, act_rst_time
+        return act_int_time * 1e6, act_rst_time * 1e6
 
-    def configure_noramp(self, int_time_us: float, reset_time_us: float) -> bool:
+    def configure_noramp(self, int_time_us: float, reset_time_us: float, period_us: float = None) -> bool:
+        if not self._validate_timing_us(int_time_us, reset_time_us):
+            return False
         if not self.connect():
             return False
-            
+
         if self._last_timer_params is None:
-            self.calculate_actual_timing(int_time_us / 1e6, reset_time_us / 1e6)
+            self._quantize_timing(int_time_us, reset_time_us, False, True)
             
         timerU_int, timerH_int, timerL_int, timerH_reset, timerL_reset = self._last_timer_params
 
@@ -260,11 +291,6 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
                 response = self.serial.read(1)
 
         return self._check_response("D", response, "end of timer config")
-
-    def configure_ramp(self, ramp_dt_us: float, int_time_us: float, reset_time_us: float) -> bool:
-        # PIC does not support this
-        logger.warning("configure_ramp called on PICSerialDAQ, but it is not supported. Ignoring.")
-        return True
 
     def set_mode(self, debug_mode: bool) -> bool:
         if not self.connect():

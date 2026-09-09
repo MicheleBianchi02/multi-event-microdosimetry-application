@@ -40,72 +40,87 @@ hardware abstraction layer.
 | `core/` | Scientific algorithms: `calc_stat.py` (variance–covariance estimators + bootstrap), `bragg_peak.py` (FLUKA curves, integration-time planning), `load_file.py` (archive/legacy readers), `data_utils.py`, `constants.py` |
 | `hardware/` | Hardware abstraction: `interfaces/` (the abstract rules), `core/HardwareManager` (role routing), concrete drivers |
 
-### 2.1 Hardware abstraction — interfaces ("Rules")
+### 2.1 Hardware abstraction — configuration, registry, interfaces ("Rules")
 
 The application never talks to concrete hardware directly. It talks to **roles**,
-defined in `hardware/interfaces/` and assigned to physical devices in
-`hardware_config.json`:
+assigned to physical devices in a **hardware configuration file**
+(`hardware_config.json`, schema version `1.0`; a validated example ships in
+`examples/`):
 
 - `timing` — one microcontroller generating the timing signals (integration, reset,
   and optionally ramp sampling triggers).
 - `gain_ch1`, `gain_ch2` — one gain controller per channel (may be the same physical
-  device, or two different ones).
+  device, or two different ones). The gain controllers also own the SE/ME line of
+  the electronics (low = ME, high = SE on the current hardware).
 - `acquisition` — the ADC readout system (a microcontroller or e.g. a NI instrument).
 
-The most general setup is therefore: one µC for the timing, two µC for the gains of
-the two channels, and one readout system for the acquisition. The same physical
-device may fulfil multiple roles, and conversely a single µC may drive the gain
-circuitry of both channels (the same GPIO can be routed to one capacitor on each
-circuit). A measurement can also use a single channel only. Devices do not have to
-share a transport: the µCs typically use simple serial ports, while the readout
-system may use a different USB/instrument protocol (e.g. NI); the transport is
-encapsulated by the concrete driver of each device class.
+The file has five flat sections, cross-referenced by id: `devices` (the µCs /
+instruments: id, name, stable **driver code**, transport, and per-capability
+parameter blocks), `circuits` (the integrator boards: fixed + switchable
+capacitors), `channels` (which circuits are active — this is where the 1-or-2
+detector choice lives; omitting `ch2` means single-detector), `roles` (role →
+device), and `connections` (an edge list stating which device pin drives which
+capacitor of which circuit — this is where the ganged wiring of the all-Pico
+bench is expressed, one pin routed to a capacitor on each board).
 
-Roles are mapped in `hardware_config.json`:
+Key rules of the schema:
 
-```json
-{
-    "devices": {
-        "pico_1": { "class": "PicoSerialDAQ", "port": "/dev/pico_daq" }
-    },
-    "roles": {
-        "acquisition": "pico_1",
-        "timing": "pico_1",
-        "gain_ch1": "pico_1",
-        "gain_ch2": "pico_1"
-    },
-    "gain_settings": {
-        "ch1": {
-            "fixed_capacitor_pF": 22.0,
-            "switchable_capacitors": [ { "value_pF": 100.0 }, ... ]
-        },
-        "ch2": { ... }
-    }
-}
-```
+- **Timing parameters** (`integration_time_us`, `reset_time_us`, `period_us`)
+  carry the unit in the name and have three shapes: `{min, max, step}` =
+  settable within bounds; `{value: x}` = fixed by firmware; `null` = derived
+  (e.g. period = int + reset — how the times are actually computed lives in
+  the concrete driver). `ramp_sampling.supported` is mandatory.
+- **Limits are enforced twice.** Drivers keep their physical limits hardcoded
+  (layer 1, validated on every call — an out-of-bounds value is *rejected*,
+  never clamped) and the config declares the envelope for the specific unit
+  (layer 2, drives the UI). At load time the declared envelope is checked to
+  lie within the hardcoded limits; on mismatch the load fails with an error
+  popup listing every problem and nothing connects. Declaring *tighter* bounds
+  than the hardware allows is legal (campaign restriction).
+- **Gain pins**: a device declares its GPIO pins in gpio-mask order; the gain
+  tables are derived from the connections, so a µC with fewer pins than the
+  circuit's capacitors is a load error, not a silent capability gap. When the
+  same device drives both circuits (ganged pins), the two channels' masks must
+  agree on shared pins: the UI links the selections and conflicting pairs are
+  rejected.
+- **Acquisition** declares `num_channels` (the binding constraint for how many
+  channels can be measured — a device may time two channels but acquire one)
+  and the ADC: `bits` and `input_ranges_volts` (a non-empty list; more than one
+  entry requires `default_input_range_volts` exactly matching one entry).
+- Every component (device, circuit, capacitor, channel, connection) may carry
+  a free-text `note`, and devices carry an optional `firmware_version`.
 
-The gain table (all valid capacitance combinations and their labels) is computed
-dynamically from `gain_settings`. In the future this section will also describe
-**which GPIO pin is connected to which capacitor** on each channel, and the gain
-table will be derived from that routing (schema still to be defined, see §6).
+**Driver codes and the registry.** Each device's `driver` code (e.g.
+`pico_serial_v1`, `pic_serial_v1`) maps to its implementation class in
+`hardware/registry.py`. Codes are stable and versioned — never renamed. The
+registry is also the code-side half of the handshake: an unknown code, a
+capability the driver cannot fulfil, or declared limits beyond the driver's
+hardcoded ones are all load errors.
+
+**Config lifecycle.** The app runs without any config (simulation and offline
+analysis only; real-hardware features stay disabled with a notice). A config is
+loaded explicitly ("Load Hardware Config…" in the connection panel) or through
+the workspace: creating a workspace copies the chosen config into the workspace
+folder and links it from `setup.json` (file name + sha256); loading the
+workspace loads that config and warns if it was edited outside the app. The
+config file used for a run is embedded verbatim in the measurement archive
+(§4.2), so every measurement carries its own provenance.
 
 #### ITimingController (`hardware/interfaces/timing.py`)
 
 | Method | Contract |
 |---|---|
 | `supports_ramp_sampling` | Whether the controller can generate ramp sampling triggers. Gates the ramp UI. |
-| `configure_noramp(int_time_us, reset_time_us)` | Configure integration and reset times for a standard measurement. |
-| `configure_ramp(ramp_dt_us, int_time_us, reset_time_us)` | Configure ramp sampling: trigger interval, integration and reset times, all in one call. |
-| `calculate_actual_timing(int_time_s, reset_time_s, ...)` | Return the *actual* (quantized) integration and reset times the hardware will use, for a target pair of times. |
-| `get_timing_limits()` | Physical limits (min/max integration time, min ramp dt). |
+| `configure_noramp(int_time_us, reset_time_us, period_us=None)` | Configure integration and reset times for a standard measurement. Arguments are validated against the driver's hardcoded limits and rejected if out of bounds. |
+| `configure_ramp(ramp_dt_us, int_time_us, reset_time_us, period_us=None)` | Configure ramp sampling: trigger interval, integration and reset times, all in one call. |
+| `calculate_actual_timing_us(int_time_us, reset_time_us, ...)` | Return the *actual* (quantized) integration and reset times the hardware will use for a target pair of times (µs in, µs out). |
 
 #### IGainController (`hardware/interfaces/gain.py`)
 
 | Method | Contract |
 |---|---|
-| `set_gpio_mask(channel, gpio_mask)` | Apply a per-channel mask of GPIO states, each bit switching a capacitor in/out. |
-| `num_gpios_per_channel` | How many GPIO pins this controller can manipulate per channel. The offered gain combinations must be constrained by this (and by the circuit definition). |
-| `set_event_mode(is_single_event)` | **Intended contract:** the SE/ME line of the electronics is owned by the *gain* controllers. When the user selects SE (or switches back to ME), `set_event_mode` is called on **both** gain controllers, so both electronics receive the signal. A future extension will allow ME on one detector and SE on the other (per-channel event mode). *Note: the current code does not work like this yet — see §5 / BUG.md (B5).* |
+| `set_gpio_mask(gpio_mask)` | Apply the state of **every declared pin of this device**, one bool per pin in the config's pin order. Which pin switches which capacitor is routing knowledge resolved by the `HardwareManager` from the config's connections. Masks of the wrong length are rejected. |
+| `set_event_mode(is_single_event)` | The SE/ME line of the electronics is owned by the *gain* controllers. Switching mode calls this on **all** gain controllers (via `HardwareManager.set_event_mode`), so every circuit receives the signal (low = ME, high = SE today). A future extension will allow ME on one detector and SE on the other (per-channel event mode). |
 
 #### IDataAcquisition (`hardware/interfaces/acquisition.py`)
 
@@ -114,7 +129,7 @@ table will be derived from that routing (schema still to be defined, see §6).
 | `arm()` | Prepare the device for measurement (no-op if unsupported). |
 | `start_measurement(session_model, data_model)` | Start the stream. The driver owns its reader thread and appends converted samples directly to `data_model`. |
 | `stop_measurement()` | Stop the stream and join the reader thread. |
-| `get_adc_settings()` | Properties of the ADC (e.g. number of bits, Vref, oversampling). **Intended to be the single source of truth for the ADC bit depth**, which drives histogram bins, the overflow sentinel and value validation. *Currently the bit depth is hardcoded instead — see §5 / BUG.md (B6).* |
+| `get_adc_settings()` | Properties of the ADC. The authoritative values come from the loaded hardware config (`HardwareManager.get_adc_settings()`: bits, effective input range, channel count); the archived snapshot is used when re-loading a measurement. |
 
 > The concrete driver implementations (Pico, PIC) are being reworked; their
 > protocols will be documented separately once final. `microcontroller_api.md` and
@@ -195,26 +210,28 @@ hardware with synthetic data for testing.
 
 ### 4.1 setup.json (workspace)
 
-Created once per campaign; loaded for every session of that campaign.
+Campaign metadata plus the link to the hardware configuration; everything
+hardware (ADC settings, capacitors, wiring, firmware) lives in the hardware
+config file itself, which is copied into the workspace folder at creation:
 
 ```json
 {
-    "versions": { "app_version": "...", "firmware_version": "...",
-                  "hardware_id_ch1": "...", "hardware_id_ch2": "..." },
+    "versions": { "app_version": "..." },
     "experimental_setup": { "facility": "...", "beam_type": "...", "shift_note": "..." },
-    "hardware_settings": {
-        "adc_num_bits": 12, "adc_vref_volts": 5.0,
-        "channels": {
-            "ch1": { "capacitor_base_values_pF": [22.0, 100.0, 560.0, 3300.0] },
-            "ch2": { "capacitor_base_values_pF": [ ... ] }
-        }
+    "hardware": {
+        "config_file": "hardware_config.json",
+        "config_sha256": "…"
     }
 }
 ```
 
-### 4.2 Measurement archive (format version "2.0")
+Loading a workspace verifies the sha256 of the linked config and warns on
+mismatch (edited outside the app). Old-format setup.json files load with their
+hardware fields ignored.
 
-Each measurement is a ZIP containing two files:
+### 4.2 Measurement archive (format version "3.0")
+
+Each measurement is a self-contained ZIP with four members:
 
 - **`data.csv`** — the **raw** measurement data (ROIs are *not* applied; they are
   stored in the JSON and re-applied at load time):
@@ -227,11 +244,21 @@ Each measurement is a ZIP containing two files:
 - **`settings.json`** — everything about the measurement:
   `file_format_version`, `versions`, `measurement_info` (ISO timestamps,
   `is_problematic` flag), `experimental_setup` (facility, beam type/energy/current,
-  depth, detector voltage, calibration, notes), `hardware_settings` (ADC settings,
-  `single_channel_mode`, per-channel gain — target format: applied `gpio_mask` and
-  total `capacitance_pF`, see §5/B4), `timing_settings` (integration/reset/period/
+  depth, detector voltage, calibration, notes), `hardware_settings` — a frozen
+  snapshot of the hardware: ADC bits and applied input range, per-channel applied
+  `gpio_mask` and total `capacitance_pF`, the resolved hardware summary and the
+  config sha256 — `timing_settings` (integration/reset/period/
   sample frequency), `analysis` (ROIs, bootstrap metadata, results of all four
-  estimators).
+  estimators). The hardware section is read-only for the offline analysis; a
+  consistency check on load verifies mask ↔ capacitance against the config.
+- **`hardware_config.json`** — verbatim copy of the config used for this run, so
+  the archive interprets itself without any external file.
+- **`setup.json`** — verbatim copy of the campaign setup.
+
+Both provenance copies are already written to the workspace temp files at
+measurement **start** (not only at save), so a crashed run recovers with full
+provenance. Pre-3.0 archives load as before (their hardware provenance is
+"unknown"); embedded copies always take precedence over the current workspace.
 
 ### 4.3 Legacy CSV (format version 1)
 
@@ -247,39 +274,40 @@ acquisition and storage of the ramp samples is future work (§6).
 
 ## 5. Intended behaviour vs. current code — biggest differences
 
-The sections above describe the **intended** behaviour. The most important points
-where the current code does not match yet (full list with severities in
-[BUG.md](BUG.md)):
+The hardware layer now works as described above (validated config, driver
+registry, role routing, gain tables from wiring, archives with embedded
+provenance). The most important remaining deviations (full list with
+severities in [BUG.md](BUG.md)):
 
 | # | Area | Intended | Current | Bug |
 |---|---|---|---|---|
-| 1 | Saved CSV | raw data; ROIs re-applied at load from settings.json | ROI-**filtered** data is written to the CSV, so out-of-ROI samples are lost in the archive | B1 |
-| 2 | Gain persistence | settings.json stores the applied GPIO mask and total capacitance per channel; restored on load | actual gain is not exported (stale `capacitor_code`); charge scaling after load falls back to defaults | B4 |
-| 3 | SE/ME switching | `set_event_mode` called on **both gain controllers** | sent to the *acquisition* device only (works today only because one device holds all roles) | B5 |
-| 4 | ADC bit depth | dynamic, from `IDataAcquisition.get_adc_settings()` | hardcoded 12 bit / 4096 bins / sentinel 32768 everywhere | B6 |
-| 5 | Connection handling | JSON-driven auto-connect (one udev rule per device), per-device manual dialog on failure, failures reported | failures always reported as success; manual mapping passes the port name instead of the device path | B2, B3 |
-| 6 | Gain capability matching | offered gain combinations constrained by the µC GPIO count (`num_gpios_per_channel`) | gain table built from the circuit definition only; capability property unused | B7 |
-| 7 | Ramp sampling | ramp samples acquired and stored | timing triggers only; acquisition side not implemented (deferred by design, not a bug) | — |
+| 1 | Connection handling | per-device auto-connect (one udev rule per device) with manual fallback | connect-all only; a manual dialog maps one device at a time; `verify_connection` still unused | B2 |
+| 2 | ADC bit depth in `DataModel` | histogram bins/overflow derived from the ADC bits | bits/range flow from the config into the archives, but `DataModel` still uses fixed 12-bit bins | B6 |
+| 3 | Ramp sampling | ramp samples acquired and stored | timing triggers only; acquisition side not implemented (deferred by design, not a bug) | — |
+| 4 | Dead legacy code | removed | superseded drivers in `services/`, unused ACF/PACF, `if False:` block remain | B17 |
 
 ## 6. Open design points
 
-- **GPIO→capacitor mapping schema** for `hardware_config.json` (which pin is wired
-  to which capacitor on each channel, including one µC driving both circuits): not
-  decided yet; the gain table computation will be based on it once defined.
+- **Hardware config editor**: UI to create/edit the config inside the app (for
+  now the file is written by hand; `examples/` ships a validated template).
+- **Simulation config**: a `hardware_config.json` whose devices use a
+  `simulation_*` driver code, so simulation runs through the same config/roles
+  path as real hardware.
+- **NI (or other) acquisition driver**: `IDataAcquisition` implementation
+  registered e.g. as `ni_daqmx_v1` (multi-range ADC, `adc_input` per channel),
+  while a µC keeps the `timing` role.
 - **Per-channel event mode** (ME on one detector, SE on the other): future
   extension of `set_event_mode`.
 - **Ramp sampling acquisition**: reader and storage for ramp samples (the timing
   side is ready).
-- **Connection verification**: whether the `verify_connection` (`V`) handshake is
-  part of the connect flow or is removed — to be decided.
-- **NI (or other) acquisition driver**: `IDataAcquisition` implementation for an
-  external readout system, while a µC keeps the `timing` role.
+- **Connection verification**: whether the `verify_connection` (`V`) handshake
+  is part of the connect flow or is removed — to be decided.
+- **Multi file analysis**: the user can analyze multiple measurements at the same
+  time (e.g. create a graph of the yD against depth or beam current).
+- **Oversampling**: ADC oversampling could be used to reduce noise.
 - **Concrete driver documentation**: the Pico/PIC implementations will be modified;
   their serial protocols will be documented when the firmware sources are final
   (`microcontroller_api.md` / `daq_architecture.txt` are outdated).
-- **Multi file analysis**: the user can analyze multiple measurement at the same time 
-  (e.g. create a graph of the yD against depth or beam current).
-- **Oversampling**: To reduce noise ADC oversampling could be used.
 
 ## 7. Running and building
 

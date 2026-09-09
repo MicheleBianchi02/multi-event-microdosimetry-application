@@ -49,16 +49,10 @@ class SessionModel(QObject):
         self.facility = "TIFPA"
         self.beam_type = "Biological"
         self.app_version = APP_VERSION
-        self.hardware_id_ch1 = ""
-        self.hardware_id_ch2 = ""
-        self.firmware_version = ""
         self.shift_note = ""
-        self.capacitor_base_values_ch1 = [22.0, 100.0, 560.0, 3000.0]
-        self.capacitor_base_values_ch2 = [22.0, 100.0, 560.0, 3000.0]
-        
-        from core.constants import NUM_BIT
-        self.adc_num_bits = NUM_BIT
-        self.adc_vref_volts = 5.0
+        # ADC settings and capacitor values are no longer session defaults:
+        # they come from the loaded hardware configuration (B6/B12), and the
+        # applied values are recorded per measurement (gpio_mask).
 
         # --- Measurement Specific Properties (Optional) ---
         self.beam_energy_mev = 0.0
@@ -67,8 +61,8 @@ class SessionModel(QObject):
         self.depth_cm = 0.0
         self.measurement_note = ""
         self.is_problematic = False
-        self.capacitor_code_ch1 = "1000"
-        self.capacitor_code_ch2 = "1000"
+        self.gpio_mask_ch1 = None  # applied per-channel pin states (B4)
+        self.gpio_mask_ch2 = None
         self.timestamp_start = None
         self.timestamp_end = None
 

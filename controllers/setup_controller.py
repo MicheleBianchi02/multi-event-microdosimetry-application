@@ -52,7 +52,14 @@ class SetupController(QObject):
     def auto_connect(self):
         if self.setup_view.simulate:
             return
-            
+
+        if not self.hardware.hardware_manager.is_loaded:
+            self.setting_window.on_connection_result(
+                False,
+                "No hardware configuration loaded — use 'Load Hardware Config' or Simulate.",
+            )
+            return
+
         failed = self.check_connection()
         if not failed:
             self.setting_window.on_connection_result(True, "All devices auto-connected successfully.")
@@ -106,13 +113,15 @@ class SetupController(QObject):
 
     def on_apply_configuration_requested(self, config: dict):
         hw_mgr = self.hardware.hardware_manager
-        if hw_mgr:
+        if hw_mgr and hw_mgr.is_loaded:
             g1_label = config.get("gain_ch1_label")
             if g1_label:
                 self.session.capacitance_pf_ch1 = hw_mgr.get_capacitance(1, g1_label)
+                self.session.gpio_mask_ch1 = hw_mgr.get_gain_mask(1, g1_label)
             g2_label = config.get("gain_ch2_label")
             if g2_label:
                 self.session.capacitance_pf_ch2 = hw_mgr.get_capacitance(2, g2_label)
+                self.session.gpio_mask_ch2 = hw_mgr.get_gain_mask(2, g2_label)
 
         # We check if simulate is true. If so, return success immediately.
         if self.setup_view.simulate:
@@ -132,12 +141,16 @@ class SetupController(QObject):
             logger.error("No timing controller assigned")
             return
             
-        act_int, act_rst = timing_controller.calculate_actual_timing(int_time_s, reset_time_s, self.session.debug_mode, self.session.multiple_channel)
-        self.session.int_time = act_int
-        self.session.reset_time = act_rst
-        self.session.sample_freq = (
-            1 / (act_int + act_rst) if (act_int + act_rst) > 0 else 0
+        act_int_us, act_rst_us = timing_controller.calculate_actual_timing_us(
+            int_time_s * 1e6,
+            reset_time_s * 1e6,
+            self.session.debug_mode,
+            self.session.multiple_channel,
         )
+        self.session.int_time = act_int_us / 1e6
+        self.session.reset_time = act_rst_us / 1e6
+        period_s = (act_int_us + act_rst_us) / 1e6
+        self.session.sample_freq = 1 / period_s if period_s > 0 else 0
         self.time_window.update_label()
 
     def check_connection(self) -> list[str]:
@@ -145,10 +158,12 @@ class SetupController(QObject):
         return self.hardware.hardware_manager.connect_all()
 
     def on_mode_switched(self):
+        # The SE/ME line belongs to the gain controllers: the command goes to
+        # all of them so every circuit receives it (B5).
         if not self.setup_view.simulate:
-            acquisition = self.hardware.hardware_manager.acquisition
-            if acquisition and hasattr(acquisition, "set_event_mode"):
-                acquisition.set_event_mode(self.session.single_event)
+            manager = self.hardware.hardware_manager
+            if manager.is_loaded:
+                manager.set_event_mode(self.session.single_event)
 
     def send_timing_config(self, timer_params: dict) -> bool:
         """Called when user presses 'Send' in the Time window."""
@@ -183,12 +198,14 @@ class SetupController(QObject):
             success = hw_mgr.apply_gain(1, g1_label)
             if success:
                 self.session.capacitance_pf_ch1 = hw_mgr.get_capacitance(1, g1_label)
+                self.session.gpio_mask_ch1 = hw_mgr.get_gain_mask(1, g1_label)
 
         g2_label = timer_params.get("gain_ch2_label")
         if success and g2_label:
             success = hw_mgr.apply_gain(2, g2_label)
             if success:
                 self.session.capacitance_pf_ch2 = hw_mgr.get_capacitance(2, g2_label)
+                self.session.gpio_mask_ch2 = hw_mgr.get_gain_mask(2, g2_label)
 
         return success
 

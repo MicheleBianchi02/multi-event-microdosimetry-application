@@ -39,18 +39,23 @@ class AppController(QObject):
         # Initialize Hardware
         from hardware.core.hardware_manager import HardwareManager
         self.hardware_manager = HardwareManager()
-        # TODO: handle missing hardware_config.json elegantly, for now load if exists
-        import os
-        config_path = "hardware_config.json"
-        if os.path.exists(config_path):
-            self.hardware_manager.load_config(config_path)
-            
         self.hardware_service = HardwareService(
             self.hardware_manager, self.data_model, self.session_model
         )
 
         # Initialize View
         self.main_window = MainWindow(self.session_model, self.data_model, simulate, self.hardware_manager)
+
+        # Views refresh their hardware-dependent parts when a config is loaded
+        self.hardware_manager.add_config_listener(
+            lambda _m: self.main_window.setup_view.setting_window.reload_devices()
+        )
+
+        # Load the hardware config linked to the active workspace, if any
+        self.session_model.workspace_changed.connect(self._on_workspace_changed)
+        self.main_window.setup_view.setting_window.load_config_requested.connect(
+            self._on_load_config_requested
+        )
 
         # Initialize Controllers
         self.setup_controller = SetupController(
@@ -66,6 +71,98 @@ class AppController(QObject):
 
         # Connect Main Window events
         self.setup_controller.simulate_requested.connect(self._on_simulate_requested)
+
+    def _on_load_config_requested(self):
+        from PyQt6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getOpenFileName(
+            self.main_window, "Load Hardware Config", "", "JSON Files (*.json)"
+        )
+        if path:
+            self._load_hardware_config(path)
+
+    def _load_hardware_config(self, path: str):
+        from hardware.config import ConfigValidationError
+
+        try:
+            self.hardware_manager.load_config(path)
+        except ConfigValidationError as e:
+            from PyQt6.QtWidgets import QMessageBox
+
+            QMessageBox.critical(
+                self.main_window,
+                "Invalid Hardware Configuration",
+                "The hardware configuration file was not accepted "
+                "(nothing was connected):\n\n" + "\n".join(f"• {err}" for err in e.errors),
+            )
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+
+            logger.exception("Failed to load hardware config")
+            QMessageBox.critical(
+                self.main_window,
+                "Hardware Configuration",
+                f"Could not read {path}:\n{e}",
+            )
+
+    def _on_workspace_changed(self, workspace_dir: str):
+        """Load the hardware config linked in the workspace's setup.json."""
+        import json
+        import os
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        if not workspace_dir:
+            return
+        setup_path = os.path.join(workspace_dir, "setup.json")
+        if not os.path.exists(setup_path):
+            return
+        try:
+            with open(setup_path, "r", encoding="utf-8") as f:
+                setup = json.load(f)
+        except Exception:
+            logger.exception("Failed to read setup.json")
+            return
+
+        hardware = setup.get("hardware", {})
+        config_file = hardware.get("config_file")
+        if not config_file:
+            QMessageBox.warning(
+                self.main_window,
+                "No Hardware Config",
+                "This workspace has no hardware configuration linked.\n"
+                "Real-hardware features stay disabled until one is loaded\n"
+                "(button 'Load Hardware Config' in the connection panel).",
+            )
+            return
+
+        config_path = os.path.join(workspace_dir, config_file)
+        if not os.path.exists(config_path):
+            QMessageBox.warning(
+                self.main_window,
+                "Hardware Config Missing",
+                f"The linked hardware config {config_file!r} was not found\n"
+                f"in the workspace folder.",
+            )
+            return
+
+        # Load first (validation errors must block), then warn on edits
+        # made outside the app (hash mismatch)
+        expected_sha = hardware.get("config_sha256")
+        self._load_hardware_config(config_path)
+        if (
+            self.hardware_manager.is_loaded
+            and expected_sha
+            and self.hardware_manager.config_sha256 != expected_sha
+        ):
+            QMessageBox.warning(
+                self.main_window,
+                "Hardware Config Changed",
+                f"{config_file!r} differs from the version recorded when the\n"
+                f"workspace was created (it was edited outside the app).\n"
+                f"Measurements remain usable, but are not directly comparable\n"
+                f"with earlier ones of this campaign.",
+            )
 
     def _on_simulate_requested(self):
         logger.info("Simulation requested via UI.")

@@ -55,6 +55,11 @@ class TimeWindow(QWidget):
         self.stacked_widget.addWidget(self.manual_config_widget)
 
         self.init_ui()
+        self.reload_hardware()
+        if self.hardware_manager is not None:
+            self.hardware_manager.add_config_listener(
+                lambda _manager: self.reload_hardware()
+            )
         self.stacked_widget.setCurrentIndex(0)  # Start with analysis
 
     def go_to_manual_config(self):
@@ -140,17 +145,9 @@ class TimeWindow(QWidget):
         # Measurement Parameters Inputs
         self.capacitance_combo_ch1 = QComboBox()
         self.capacitance_combo_ch2 = QComboBox()
-        
-        if self.hardware_manager:
-            ch1_labels = self.hardware_manager.get_gain_labels(1)
-            ch2_labels = self.hardware_manager.get_gain_labels(2)
-            if ch1_labels:
-                self.capacitance_combo_ch1.addItems(ch1_labels)
-            if ch2_labels:
-                self.capacitance_combo_ch2.addItems(ch2_labels)
-                
         self.capacitance_combo_ch1.currentIndexChanged.connect(self.on_cap_change)
         self.capacitance_combo_ch2.currentIndexChanged.connect(self.on_cap_change)
+        self._adjusting_linked_gain = False
 
         self.beam_energy_input = QLineEdit(str(self.session.beam_energy_mev))
         self.beam_current_input = QLineEdit(str(self.session.beam_current_na))
@@ -291,17 +288,10 @@ class TimeWindow(QWidget):
         
         self.sample_ramp_cb.stateChanged.connect(self.on_manual_edit)
         self.ramp_dt_input.textEdited.connect(self.on_manual_edit)
-        
-        supports_ramp = False
-        if self.hardware_manager and self.hardware_manager.timing:
-            supports_ramp = self.hardware_manager.timing.supports_ramp_sampling
-            
-        if supports_ramp:
-            master.addWidget(self.sample_ramp_cb)
-            master.addWidget(self.ramp_dt_widget)
-        else:
-            self.sample_ramp_cb.setVisible(False)
-            self.ramp_dt_widget.setVisible(False)
+
+        # Visibility depends on the loaded hardware config (reload_hardware)
+        master.addWidget(self.sample_ramp_cb)
+        master.addWidget(self.ramp_dt_widget)
             
         master.addSpacing(15)
 
@@ -461,6 +451,72 @@ class TimeWindow(QWidget):
     def on_cap_change(self):
         self.already_sent = False
         self.send_bnt.setEnabled(True)
+        # With ganged pins the channels' gains are physically coupled: keep
+        # the ch2 selection compatible with the ch1 one.
+        manager = self.hardware_manager
+        if (
+            not self._adjusting_linked_gain
+            and manager is not None
+            and manager.is_loaded
+            and manager.channels_share_gain
+        ):
+            current = self.capacitance_combo_ch2.currentText()
+            if manager.gains_conflict(
+                self.capacitance_combo_ch1.currentText(), current
+            ):
+                self._adjusting_linked_gain = True
+                for i in range(self.capacitance_combo_ch2.count()):
+                    label = self.capacitance_combo_ch2.itemText(i)
+                    if not manager.gains_conflict(
+                        self.capacitance_combo_ch1.currentText(), label
+                    ):
+                        self.capacitance_combo_ch2.setCurrentIndex(i)
+                        break
+                self._adjusting_linked_gain = False
+
+    def reload_hardware(self):
+        """Rebuild the hardware-dependent parts after a config load/unload."""
+        manager = self.hardware_manager
+        ch2_active = manager is not None and manager.is_loaded and "ch2" in manager.active_channels
+        dual_possible = manager is not None and manager.max_channels >= 2
+
+        self.capacitance_combo_ch1.blockSignals(True)
+        self.capacitance_combo_ch1.clear()
+        if manager is not None and manager.is_loaded:
+            self.capacitance_combo_ch1.addItems(manager.get_gain_labels(1))
+        self.capacitance_combo_ch1.blockSignals(False)
+
+        self.capacitance_combo_ch2.blockSignals(True)
+        self.capacitance_combo_ch2.clear()
+        if ch2_active:
+            self.capacitance_combo_ch2.addItems(manager.get_gain_labels(2))
+        self.capacitance_combo_ch2.blockSignals(False)
+        self.capacitance_combo_ch2.setVisible(ch2_active)
+
+        shared = manager is not None and manager.is_loaded and manager.channels_share_gain
+        self.capacitance_combo_ch2.setEnabled(ch2_active and not shared)
+        if shared:
+            self.capacitance_combo_ch2.setToolTip(
+                "Gain pins are shared with CH1: the selection follows CH1."
+            )
+        else:
+            self.capacitance_combo_ch2.setToolTip("")
+
+        supports_ramp = manager is not None and manager.supports_ramp_sampling
+        self.sample_ramp_cb.setVisible(supports_ramp)
+        self.ramp_dt_widget.setVisible(supports_ramp)
+
+        # Channel gating (B8): the acquisition system bounds the choice
+        if not dual_possible:
+            self.num_channel_box.blockSignals(True)
+            self.num_channel_box.setChecked(True)
+            self.num_channel_box.setEnabled(False)
+            self.num_channel_box.blockSignals(False)
+            self.session.multiple_channel = False
+        else:
+            self.num_channel_box.setEnabled(True)
+
+        self.on_manual_edit()
 
     def update_label(self):
         i_ms = self.session.int_time * 1000

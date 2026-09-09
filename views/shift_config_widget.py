@@ -68,41 +68,26 @@ class ShiftConfigWidget(QWidget):
         # Other inputs
         self.app_version_input = QLineEdit()
         self.app_version_input.setPlaceholderText(f"Defaults to {APP_VERSION}")
-        
-        self.fw_version_input = QLineEdit()
-        self.fw_version_input.setPlaceholderText(f"Defaults to {APP_VERSION}")
-        
-        self.adc_bits_input = QLineEdit()
-        self.adc_vref_input = QLineEdit()
-        
-        self.hardware_id_ch1_input = QLineEdit()
-        self.hardware_id_ch2_input = QLineEdit()
-        
-        self.ch1_cap_input = QLineEdit()
-        self.ch1_cap_input.setPlaceholderText("e.g. 22, 100, 560, 3000")
-        
-        self.ch2_cap_input = QLineEdit()
-        self.ch2_cap_input.setPlaceholderText("e.g. 22, 100, 560, 3000")
-        
+
+        # Hardware configuration: picked here, copied into the workspace and
+        # linked from setup.json (its content is validated by the app on load)
+        self.hardware_config_input = QLineEdit()
+        self.hardware_config_input.setPlaceholderText(
+            "hardware_config.json to copy into this workspace (optional)"
+        )
+        self.hardware_config_browse = QPushButton("Browse…")
+        self.hardware_config_browse.clicked.connect(self.on_browse_hardware_config)
+        hw_cfg_layout = QHBoxLayout()
+        hw_cfg_layout.addWidget(self.hardware_config_input, 1)
+        hw_cfg_layout.addWidget(self.hardware_config_browse)
+
         self.shift_note_input = QTextEdit()
         self.shift_note_input.setMaximumHeight(80)
 
         form.addRow("Facility:", facility_layout)
         form.addRow("Beam Type:", beam_type_layout)
         form.addRow("App Version:", self.app_version_input)
-        form.addRow("Firmware Version:", self.fw_version_input)
-        form.addRow("Hardware ID CH1:", self.hardware_id_ch1_input)
-        form.addRow("Hardware ID CH2:", self.hardware_id_ch2_input)
-        
-        hw_layout = QHBoxLayout()
-        hw_layout.addWidget(QLabel("ADC Bits:"))
-        hw_layout.addWidget(self.adc_bits_input)
-        hw_layout.addWidget(QLabel("VRef (V):"))
-        hw_layout.addWidget(self.adc_vref_input)
-        form.addRow("ADC Settings:", hw_layout)
-        
-        form.addRow("CH1 Capacitors (pF):", self.ch1_cap_input)
-        form.addRow("CH2 Capacitors (pF):", self.ch2_cap_input)
+        form.addRow("Hardware Config:", hw_cfg_layout)
         form.addRow("Shift Note:", self.shift_note_input)
 
         layout.addWidget(group_box)
@@ -186,18 +171,24 @@ class ShiftConfigWidget(QWidget):
             self.workspace_lbl.setText("Active Workspace: None")
 
         self.set_facility_and_beam(self.session.facility, self.session.beam_type)
-        
+
         self.app_version_input.setText(self.session.app_version)
-        self.fw_version_input.setText(self.session.firmware_version)
-        self.hardware_id_ch1_input.setText(self.session.hardware_id_ch1)
-        self.hardware_id_ch2_input.setText(self.session.hardware_id_ch2)
-        
-        self.adc_bits_input.setText(str(self.session.adc_num_bits))
-        self.adc_vref_input.setText(str(self.session.adc_vref_volts))
-        
-        self.ch1_cap_input.setText(", ".join(map(str, self.session.capacitor_base_values_ch1)))
-        self.ch2_cap_input.setText(", ".join(map(str, self.session.capacitor_base_values_ch2)))
-        
+
+        # show the config already linked to the active workspace, if any
+        import json
+        config_name = ""
+        workspace = getattr(self.session, "active_workspace_dir", None)
+        if workspace:
+            setup_path = os.path.join(workspace, "setup.json")
+            try:
+                with open(setup_path, "r", encoding="utf-8") as f:
+                    config_name = os.path.join(
+                        workspace, json.load(f).get("hardware", {}).get("config_file", "")
+                    )
+            except Exception:
+                config_name = ""
+        self.hardware_config_input.setText(config_name if os.path.exists(config_name) else "")
+
         self.shift_note_input.setPlainText(self.session.shift_note)
 
     def update_session_from_fields(self):
@@ -212,30 +203,14 @@ class ShiftConfigWidget(QWidget):
             self.session.beam_type = self.beam_type_combo.currentText()
             
         self.session.app_version = self.app_version_input.text() or APP_VERSION
-        self.session.firmware_version = self.fw_version_input.text()
-        self.session.hardware_id_ch1 = self.hardware_id_ch1_input.text()
-        self.session.hardware_id_ch2 = self.hardware_id_ch2_input.text()
         self.session.shift_note = self.shift_note_input.toPlainText()
-        
-        try:
-            from core.constants import NUM_BIT
-            self.session.adc_num_bits = int(self.adc_bits_input.text())
-        except ValueError:
-            self.session.adc_num_bits = NUM_BIT
-            
-        try:
-            self.session.adc_vref_volts = float(self.adc_vref_input.text())
-        except ValueError:
-            self.session.adc_vref_volts = 5.0
-        
-        def parse_caps(text):
-            try:
-                return [float(x.strip()) for x in text.split(",")]
-            except ValueError:
-                return [22.0, 100.0, 560.0, 3000.0]
-                
-        self.session.capacitor_base_values_ch1 = parse_caps(self.ch1_cap_input.text())
-        self.session.capacitor_base_values_ch2 = parse_caps(self.ch2_cap_input.text())
+
+    def on_browse_hardware_config(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Choose Hardware Config", "", "JSON Files (*.json)"
+        )
+        if file_path:
+            self.hardware_config_input.setText(file_path)
 
     def on_load_clicked(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -257,7 +232,8 @@ class ShiftConfigWidget(QWidget):
         if file_path:
             if not file_path.endswith(".json"):
                 file_path += ".json"
-            if ShiftService.save_setup(self.session, file_path):
+            config_source = self.hardware_config_input.text().strip() or None
+            if ShiftService.save_setup(self.session, file_path, config_source):
                 self.populate_fields()
                 folder_path = os.path.dirname(file_path)
                 QMessageBox.information(self, "Success", f"Workspace created at:\n{folder_path}\nFile: {os.path.basename(file_path)}")
