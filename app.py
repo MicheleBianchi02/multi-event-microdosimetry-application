@@ -216,6 +216,17 @@ class AppController(QObject):
 
         workspace = self.session_model.active_workspace_dir
         dest = os.path.join(workspace, os.path.basename(path))
+        if os.path.abspath(dest) == os.path.abspath(
+            os.path.join(workspace, self.session_model.setup_file_name)
+        ):
+            QMessageBox.critical(
+                self.main_window,
+                "Reserved File Name",
+                f"{os.path.basename(path)} is the name of this workspace's setup "
+                f"file. The hardware configuration must use a different name — "
+                f"rename the file and import it again.",
+            )
+            return
         if os.path.exists(dest) and os.path.abspath(dest) != os.path.abspath(path):
             try:
                 with open(dest, "r", encoding="utf-8") as f:

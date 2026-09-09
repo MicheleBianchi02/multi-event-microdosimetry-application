@@ -100,8 +100,9 @@ def _valid_bench_config() -> dict:
     em.set_role(cfg, "acquisition", pico_id)
     em.set_role(cfg, "gain_ch1", pic_id)
     em.set_channel(cfg, "ch1", board_id)
-    for cap, pin in (("c100", 2), ("c560", 2), ("c3300", 2)):
-        em.set_connection(cfg, "ch1", cap, pin)
+    # one capacitor per pin: c560/c3300 left unwired (see the known
+    # multi-capacitor-per-pin limitation reported separately)
+    em.set_connection(cfg, "ch1", "c100", 2)
     return cfg
 
 
@@ -238,6 +239,85 @@ def test_apply_configuration_ramp_backstop(controller, workspace):
         }
     )
     assert ok is False  # rejected, not NameError
+
+
+def test_import_refuses_setup_file_name_collision(controller, workspace, tmp_path, monkeypatch):
+    """Importing a file named exactly like the workspace's setup file must be
+    refused: the copy would overwrite the campaign metadata (B4)."""
+    _stub_popups()
+    setup_path = os.path.join(workspace, controller.session_model.setup_file_name)
+    before = open(setup_path).read()
+
+    # a "hardware config" that lives elsewhere but is named like the setup file
+    external = tmp_path / "elsewhere"
+    external.mkdir()
+    decoy = external / controller.session_model.setup_file_name
+    decoy.write_text(json.dumps(_valid_bench_config()))
+
+    from PyQt6.QtWidgets import QFileDialog
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(decoy), "")))
+    controller._on_hardware_import()
+
+    assert open(setup_path).read() == before  # setup metadata untouched
+    assert not controller.hardware_manager.is_loaded
+    assert len(popups["critical"]) == 1  # refused with an explanation
+
+
+def test_check_embedded_hardware(controller, workspace):
+    """D1/D2: embedded-config hash check, workspace mismatch, and the
+    gpio_mask <-> capacitance consistency check against the gain table."""
+    import hashlib
+
+    from hardware.core.hardware_manager import HardwareManager
+
+    cfg = _valid_bench_config()
+    hw_text = json.dumps(cfg, indent=4)
+    sha = hashlib.sha256(hw_text.encode("utf-8")).hexdigest()
+    # the gain device is the PIC (1 pin): masks are expressed in THAT
+    # device's pin order/count; only c100 is wired -> 122 pF when on
+    hw_settings = {
+        "hardware_config_sha256": sha,
+        "channels": {"ch1": {"gpio_mask": [True], "capacitance_pF": 122.0}},
+    }
+    # the manager holds the same config -> no mismatch
+    ref = os.path.join(workspace, "hardware_config.json")
+    with open(ref, "w") as f:
+        f.write(hw_text)
+    controller._load_hardware_config(ref)
+
+    embedded = {"hardware_config": hw_text}
+    assert controller.measurement_controller._check_embedded_hardware(embedded, hw_settings) == []
+
+    # tampered embedded copy: hash mismatch
+    tampered = json.dumps(cfg | {"schema_version": "1.0", "circuits": cfg["circuits"]}, indent=4)
+    tampered_text = hw_text.replace('"Pico 2"', '"Pico 2 MOD"')
+    problems = controller.measurement_controller._check_embedded_hardware({"hardware_config": tampered_text}, hw_settings)
+    assert any("does not match the hash" in p for p in problems)
+
+    # stored gain not reproducible from the config: mask says c100+c560 but
+    # capacitance claims 122 pF
+    bad = dict(hw_settings)
+    bad["channels"] = {"ch1": {"gpio_mask": [True], "capacitance_pF": 100.0}}
+    problems = controller.measurement_controller._check_embedded_hardware(embedded, bad)
+    assert any("does not correspond to any combination" in p for p in problems)
+
+    # a manager loaded with the SAME file (same bytes) is not reported
+    other = os.path.join(workspace, "other.json")
+    with open(other, "w") as f:
+        f.write(hw_text)
+    controller._load_hardware_config(other)
+    problems = controller.measurement_controller._check_embedded_hardware(embedded, hw_settings)
+    assert problems == []  # byte-identical file: no mismatch
+
+    different = _valid_bench_config()
+    different["circuits"]["board_ch1"]["fixed_capacitance_pF"] = 33.0
+    different_text = json.dumps(different, indent=4)
+    with open(other, "w") as f:
+        f.write(different_text)
+    controller._load_hardware_config(other)
+    problems = controller.measurement_controller._check_embedded_hardware(embedded, hw_settings)
+    assert any("different hardware configuration" in p for p in problems)
 
 
 def test_new_with_custom_setup_file_name(controller, tmp_path, monkeypatch):

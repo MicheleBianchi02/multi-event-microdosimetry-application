@@ -337,6 +337,7 @@ severities in [BUG.md](BUG.md)):
 - **Concrete driver documentation**: the Pico/PIC implementations will be modified;
   their serial protocols will be documented when the firmware sources are final
   (`microcontroller_api.md` / `daq_architecture.txt` are outdated).
+- **FFT analysis**: Add FFT analysis custom window for the result panel.
 
 ## 7. Running and building
 

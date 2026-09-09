@@ -164,6 +164,19 @@ Severity scale:
   acquisition device can measure, and the wizard disables the dual-channel
   choice when `max_channels < 2`.
 
+### B18 — "Save as Component…" writes fragments that fail re-import validation
+- **Intended:** a component saved from the hardware config editor can be
+  re-imported from the library without errors.
+- **Current:** `_save_component` (`views/hardware_config_editor.py`) strips the
+  whole `connection` block from device fragments (to drop the machine-specific
+  port), but the loader requires `connection` with a `type`; re-adding the
+  saved component fails with
+  `devices.<id>.connection: must be an object with a 'type'`.
+- **Fix direction:** save `{"type": "serial", "port": "", "baud_rate": …}`
+  (empty port like the shipped fragments) instead of removing the block.
+- Not fixed yet: the connection/transport handling is being reworked first
+  (deferred with the auto-connect work, B2).
+
 ### B9 — `PICSerialDAQ.configure_ramp` is defined twice; the surviving one returns success — **FIXED**
 - `hardware/pic/pic_daq.py:171` returns `False` (unsupported), but the second
   definition at `:264` overrides it and returns `True` "Ignoring". Direct calls

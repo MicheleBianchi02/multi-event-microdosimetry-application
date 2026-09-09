@@ -9,7 +9,11 @@ def main():
     # PyInstaller uses ';' as a separator for --add-data on Windows, and ':' on Unix-like systems
     data_separator = ";" if platform.system() == "Windows" else ":"
 
-    data_arg = f"data{data_separator}data"
+    data_args = [
+        f"data{data_separator}data",
+        f"hardware_library{data_separator}hardware_library",
+        f"examples{data_separator}examples",
+    ]
 
     # Build the PyInstaller command arguments
     # Note: --noconfirm automatically overwrites the dist/ folder if it exists
@@ -25,7 +29,7 @@ def main():
         "--collect-all=PyQt6",
         "--collect-all=numpy",
         "--collect-all=pyqtgraph",
-        f"--add-data={data_arg}",
+        *[f"--add-data={arg}" for arg in data_args],
         "app.py",
     ]
 

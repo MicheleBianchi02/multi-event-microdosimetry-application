@@ -290,6 +290,12 @@ class MeasurementController(QObject):
                 if ch2_settings.get("capacitance_pF") is not None:
                     self.session.capacitance_pf_ch2 = ch2_settings["capacitance_pF"]
                 # single_event is not loaded from json
+
+                problems = self._check_embedded_hardware(result.get("embedded") or {}, hw_settings)
+                if problems:
+                    QMessageBox.warning(
+                        self.main_window, "Hardware Provenance", "\n".join(problems)
+                    )
                 analysis = settings.get("analysis", {})
                 self.session.analysis_timestamp = analysis.get("analysis_timestamp", "")
                 self.session.rois = analysis.get("rois_channel") or []
@@ -353,6 +359,84 @@ class MeasurementController(QObject):
         except Exception as e:
             logger.exception("Failed to process loaded data")
             QMessageBox.warning(self.main_window, "Error", f"Failed to process data: {str(e)}")
+
+    def _check_embedded_hardware(self, embedded: dict, hw_settings: dict) -> list:
+        """Verify a v3 archive's embedded hardware configuration (D1/D2):
+
+        - the embedded file matches the hash recorded in settings.json;
+        - the embedded file matches the currently loaded workspace config;
+        - the embedded file matches the workspace setup file;
+        - every stored channel gain (gpio_mask + capacitance) corresponds to
+          an option of the embedded configuration's gain table.
+        Returns a list of problems (empty when the provenance is consistent).
+        """
+        import hashlib
+        import json as jsonlib
+        import math
+
+        problems = []
+        hw_text = (embedded or {}).get("hardware_config")
+        if not hw_text:
+            return problems  # pre-3.0 archive: no embedded provenance
+
+        sha = hashlib.sha256(hw_text.encode("utf-8")).hexdigest()
+        recorded = hw_settings.get("hardware_config_sha256")
+        if recorded and sha != recorded:
+            problems.append(
+                "The embedded hardware configuration does not match the hash "
+                "recorded in the archive settings (the archive was modified)."
+            )
+
+        manager = self.hardware.hardware_manager
+        if manager.is_loaded and manager.config_sha256 and manager.config_sha256 != sha:
+            problems.append(
+                "This measurement was recorded with a different hardware "
+                "configuration than the one currently loaded: gain options and "
+                "limits shown by the wizard belong to the loaded configuration."
+            )
+
+        setup_text = (embedded or {}).get("setup")
+        current_setup = self._read_text(self._workspace_setup_file())
+        if setup_text and current_setup is not None:
+            try:
+                if jsonlib.loads(current_setup) != jsonlib.loads(setup_text):
+                    problems.append(
+                        "The workspace setup file differs from the one embedded "
+                        "in this archive."
+                    )
+            except jsonlib.JSONDecodeError:
+                pass
+
+        try:
+            from hardware.config import build_channel_gain_model, hardware_config_from_dict
+            from hardware.registry import registry_descriptors
+
+            cfg = hardware_config_from_dict(jsonlib.loads(hw_text), registry_descriptors())
+            for ch in ("ch1", "ch2"):
+                stored = (hw_settings.get("channels") or {}).get(ch) or {}
+                mask = stored.get("gpio_mask")
+                capacitance = stored.get("capacitance_pF")
+                if mask is None or capacitance is None or ch not in cfg.channels:
+                    continue
+                gain_dev_id = cfg.roles.gain_ch1 if ch == "ch1" else cfg.roles.gain_ch2
+                num_pins = len(cfg.devices[gain_dev_id].gain.pins)
+                match = any(
+                    list(option.mask_for(gain_dev_id, num_pins)) == [bool(b) for b in mask]
+                    and math.isclose(option.capacitance_pF, float(capacitance), rel_tol=1e-9, abs_tol=1e-9)
+                    for option in build_channel_gain_model(cfg, ch).options
+                )
+                if not match:
+                    problems.append(
+                        f"The stored gain of {ch} (mask {mask}, {capacitance:g} pF) "
+                        f"does not correspond to any combination of the embedded "
+                        f"hardware configuration."
+                    )
+        except Exception:
+            problems.append(
+                "The embedded hardware configuration could not be validated "
+                "(the file inside the archive failed to parse)."
+            )
+        return problems
 
     def _workspace_file(self, name: str):
         workspace = getattr(self.session, "active_workspace_dir", None)
