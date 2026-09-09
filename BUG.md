@@ -140,9 +140,10 @@ Severity scale:
   controller's declared GPIO count (also used by the future GPIO→capacitor
   mapping, see README §6).
 - **Fixed (2026-09-09):** the gain tables are derived from the config's
-  `connections` (pin → capacitor edges); a capacitor without a driving pin, or a
-  pin not declared for the gain device, is a load error. A µC with fewer pins
-  than the circuit's capacitors can no longer produce an undrivable table.
+  `connections` (pin → capacitor edges); a pin not declared for the gain
+  device, or an edge naming another device, is a load error. A µC with fewer
+  pins than the circuit's capacitors can no longer produce an undrivable
+  table: unwired capacitors are excluded from it (warning), by design.
 
 ### B8 — Dual-channel UI offered with hardware that acquires one channel only — **FIXED**
 - **Intended:** the channel selection reflects what the acquisition system can

@@ -182,6 +182,31 @@ def set_role(config: dict, role: str, device_id: Optional[str]) -> None:
     if role not in VALID_ROLES:
         raise ValueError(f"unknown role {role!r}")
     config.setdefault("roles", {})[role] = device_id
+    if role in ("gain_ch1", "gain_ch2"):
+        # wiring edges of the channel's circuit that the new gain device
+        # cannot drive are stale: drop them instead of reporting them
+        _prune_channel_wiring(config, "ch1" if role == "gain_ch1" else "ch2")
+
+
+def _prune_channel_wiring(config: dict, channel: str) -> None:
+    """Drop wiring edges of the channel's circuit that the current gain
+    device cannot drive (edges of another device, or of undeclared pins)."""
+    gain_dev_id = config.get("roles", {}).get("gain_ch1" if channel == "ch1" else "gain_ch2")
+    circuit_id = config.get("channels", {}).get(channel, {}).get("circuit")
+    if not circuit_id:
+        return
+    pins = set()
+    if gain_dev_id:
+        dev = config.get("devices", {}).get(gain_dev_id, {})
+        pins = set(dev.get("capabilities", {}).get("gain", {}).get("pins", []))
+    config["connections"][:] = [
+        c
+        for c in config.get("connections", [])
+        if not (
+            c.get("circuit") == circuit_id
+            and (c.get("device") != gain_dev_id or c.get("pin") not in pins)
+        )
+    ]
 
 
 def set_channel(config: dict, channel: str, circuit_id: Optional[str], adc_input: Optional[str] = None) -> None:
@@ -195,12 +220,18 @@ def set_channel(config: dict, channel: str, circuit_id: Optional[str], adc_input
             gain_role = "gain_ch1" if channel == "ch1" else "gain_ch2"
             config.setdefault("roles", {})[gain_role] = None
         return
+    old_circuit = channels.get(channel, {}).get("circuit")
     entry = channels.setdefault(channel, {})
     entry["circuit"] = circuit_id
     if adc_input:
         entry["adc_input"] = adc_input
     else:
         entry.pop("adc_input", None)
+    if old_circuit and old_circuit != circuit_id:
+        # the channel moved to another circuit: its old wiring is stale
+        config["connections"][:] = [
+            c for c in config.get("connections", []) if c.get("circuit") != old_circuit
+        ]
 
 
 def rename_capacitor(config: dict, circuit_id: str, old_id: str, new_id: str) -> None:

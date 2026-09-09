@@ -84,11 +84,13 @@ Key rules of the schema:
   popup listing every problem and nothing connects. Declaring *tighter* bounds
   than the hardware allows is legal (campaign restriction).
 - **Gain pins**: a device declares its GPIO pins in gpio-mask order; the gain
-  tables are derived from the connections, so a µC with fewer pins than the
-  circuit's capacitors is a load error, not a silent capability gap. When the
-  same device drives both circuits (ganged pins), the two channels' masks must
-  agree on shared pins: the UI links the selections and conflicting pairs are
-  rejected.
+  tables are derived from the connections, so they contain only combinations
+  the wiring actually supports. A circuit may hold more switchable capacitors
+  than its controller can drive: unwired ones are excluded from the gain
+  table (warning at load), while wiring that contradicts the declared pins or
+  roles is a load error. When the same device drives both circuits (ganged
+  pins), the two channels' masks must agree on shared pins: the UI links the
+  selections and conflicting pairs are rejected.
 - **Acquisition** declares `num_channels` (the binding constraint for how many
   channels can be measured — a device may time two channels but acquire one)
   and the ADC: `bits` and `input_ranges_volts` (a non-empty list; more than one

@@ -222,9 +222,12 @@ hardware): switching mode signals **all** gain controllers.
 A flat list of wiring edges: *this pin of this device drives that capacitor
 of that circuit*. Rules:
 
-- every switchable capacitor of every active circuit must be driven by
-  **exactly one** pin;
-- the pin must belong to the device that holds the channel's gain role;
+- a switchable capacitor is driven by **at most one** pin; the pin must
+  belong to the device that holds the channel's gain role;
+- a capacitor left **unwired is allowed**: it is never switched and does not
+  appear in the gain table. This is the normal case when a circuit has more
+  switchable capacitors than the gain controller can drive — the app loads
+  the file with a warning listing the excluded capacitors;
 - a pin **may** drive capacitors of both circuits (first two lines above):
   the two channels' gains are then *ganged* — they always switch together,
   and the app links the two gain selections in the wizard (choosing for CH1

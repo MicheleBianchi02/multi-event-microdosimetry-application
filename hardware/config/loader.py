@@ -605,12 +605,15 @@ def _validate_semantics(config: HardwareConfig, errors: list, warnings: list) ->
                     f"{circuit.id!r}; they switch together"
                 )
 
+        # a circuit may contain more switchable capacitors than its gain
+        # device can drive: an unwired capacitor is allowed and simply never
+        # takes part in the gain table
         for capacitor in circuit.switchable_capacitors:
             conn = by_capacitor.get(capacitor.id)
             if conn is None:
-                errors.append(
-                    f"connections: capacitor {circuit.id}.{capacitor.id!r} is not driven "
-                    f"by any pin"
+                warnings.append(
+                    f"connections: capacitor {circuit.id}.{capacitor.id!r} is not wired "
+                    f"to any pin; it is excluded from the gain table"
                 )
                 continue
             if conn.device != gain_dev_id:
@@ -628,6 +631,11 @@ def _validate_semantics(config: HardwareConfig, errors: list, warnings: list) ->
 
         if circuit.fixed_capacitance_pF <= 0 and not circuit.switchable_capacitors:
             errors.append(f"circuits.{circuit.id}: no fixed and no switchable capacitance")
+        elif circuit.fixed_capacitance_pF <= 0 and not by_capacitor:
+            warnings.append(
+                f"circuits.{circuit.id}: no selectable capacitance (no fixed capacitor "
+                f"and no wired switchable capacitor)"
+            )
 
     # connections referencing inactive circuits are ignored
     for conn in connections:

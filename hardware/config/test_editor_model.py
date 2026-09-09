@@ -140,6 +140,38 @@ class TestAssembly:
         errors, _ = em.validate(cfg, REGISTRY)
         assert not any("ch2" in e and "circuit" in e for e in errors)
 
+    def test_gain_role_change_prunes_stale_wiring(self):
+        """The user's scenario: wire 3 caps to a 3-pin pico, then switch the
+        gain device to the 1-pin pic — stale edges must disappear, and the
+        error pane must not report edges of the old device."""
+        cfg = all_pico_config()
+        pic = {
+            "name": "PIC", "driver": "pic_serial_v1",
+            "connection": {"type": "serial", "port": "", "baud_rate": 115200},
+            "capabilities": {"gain": {"pins": [2]}},
+        }
+        em.add_device(cfg, pic, "pic_1")
+        em.set_role(cfg, "gain_ch1", "pic_1")  # <- the change that stale-d the edges
+
+        edges = [c for c in cfg["connections"] if c["circuit"] == "board_ch1"]
+        assert edges == []  # none of the pico's edges survive the switch
+        errors, warnings = em.validate(cfg, REGISTRY)
+        assert not any("driven by device" in e for e in errors)
+        # the pic can drive c100 again from pin 2:
+        em.set_connection(cfg, "ch1", "c100", 2)
+        errors, warnings = em.validate(cfg, REGISTRY)
+        assert not any("c100" in e for e in errors)
+        assert any("c560" in w and "not wired" in w for w in warnings)
+        assert any("c3300" in w and "not wired" in w for w in warnings)
+
+    def test_circuit_reassignment_prunes_old_wiring(self):
+        cfg = ganged_config()
+        em.add_circuit(cfg, {"name": "spare", "fixed_capacitance_pF": 10.0,
+                             "switchable_capacitors": [{"id": "c47", "value_pF": 47.0}]}, "board_spare")
+        em.set_channel(cfg, "ch1", "board_spare")
+        assert all(c["circuit"] != "board_ch1" for c in cfg["connections"])
+        assert em.connection_of(cfg, "ch1", "c47") is None  # new circuit: unwired
+
     def test_set_connection_replaces_edge(self):
         cfg = sample_config()
         em.set_connection(cfg, "ch1", "c100", 4)

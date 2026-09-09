@@ -381,10 +381,27 @@ class TestSemanticErrors:
         cfg["channels"]["ch2"]["circuit"] = "board_ch1"
         expect_error(cfg, "already used by")
 
-    def test_undriven_capacitor(self):
+    def test_undriven_capacitor_is_warning(self):
+        """A circuit may hold more capacitors than the controller drives:
+        unwired ones are excluded from the gain table (warning, not error)."""
         cfg = ganged_config()
         cfg["connections"] = cfg["connections"][:3]  # drop board_ch2 edge
-        expect_error(cfg, "not driven by any pin")
+        config = load(cfg, FULL_REGISTRY)
+        assert any("not wired" in w and "c3300" not in w for w in config.warnings)
+        model = build_channel_gain_model(config, "ch2")
+        assert model.options == []  # fixed = 0, nothing wired
+
+    def test_partially_wired_circuit_gain_table(self):
+        cfg = all_pico_config()
+        cfg["connections"] = [
+            c for c in cfg["connections"] if c["capacitor"] == "c100"
+        ]  # c560 and c3300 left unwired
+        config = load(cfg, FULL_REGISTRY)
+        assert any("c560" in w and "not wired" in w for w in config.warnings)
+        assert any("c3300" in w and "not wired" in w for w in config.warnings)
+        model = build_channel_gain_model(config, "ch1")
+        caps = sorted(round(o.capacitance_pF, 3) for o in model.options)
+        assert caps == [22.0, 122.0]  # fixed only, fixed + c100
 
     def test_capacitor_driven_by_wrong_device(self):
         cfg = split_config()
