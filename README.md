@@ -277,6 +277,9 @@ where the current code does not match yet (full list with severities in
 - **Concrete driver documentation**: the Pico/PIC implementations will be modified;
   their serial protocols will be documented when the firmware sources are final
   (`microcontroller_api.md` / `daq_architecture.txt` are outdated).
+- **Multi file analysis**: the user can analyze multiple measurement at the same time 
+  (e.g. create a graph of the yD against depth or beam current).
+- **Oversampling**: To reduce noise ADC oversampling could be used.
 
 ## 7. Running and building
 
