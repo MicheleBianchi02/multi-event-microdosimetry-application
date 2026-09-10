@@ -274,7 +274,7 @@ Each measurement is a self-contained ZIP with four members:
     stored as NaN.
 - **`settings.json`** — everything about the measurement:
   `file_format_version`, `versions`, `measurement_info` (ISO timestamps,
-  `is_problematic` flag), `experimental_setup` (facility, beam type/energy/current,
+  `acquisition_mode`, `is_problematic` flag), `experimental_setup` (facility, beam type/energy/current,
   depth, detector voltage, calibration, notes), `hardware_settings` — a frozen
   snapshot of the hardware: ADC bits and applied input range, per-channel applied
   `gpio_mask` and total `capacitance_pF`, the resolved hardware summary and the
@@ -332,6 +332,12 @@ severities in [BUG.md](BUG.md)):
   side is ready).
 - **Connection verification**: whether the `verify_connection` (`V`) handshake
   is part of the connect flow or is removed — to be decided.
+- **Debug-only run path (decided, deferred)**: the application will always
+  acquire in debug mode (start/stop recorded). The Pico natively transmits
+  start/stop and has no mode command; the PIC supports both via `M D`/`M P`.
+  Remaining work: remove the Operational choice from the wizard, always use
+  the debug TX-delay constants on the PIC, keep the 3-column loader for old
+  files. Archives already record `measurement_info.acquisition_mode`.
 - **Multi file analysis**: the user can analyze multiple measurements at the same
   time (e.g. create a graph of the yD against depth or beam current).
 - **Oversampling**: ADC oversampling could be used to reduce noise.

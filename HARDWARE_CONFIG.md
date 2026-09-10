@@ -418,6 +418,14 @@ interpretation of old data.
 - operational mode: `timestamp,ch1,ch2` — the start/stop voltage-differences
   of each channel;
 - debug mode: `timestamp,ch1_start,ch1_stop,ch2_start,ch2_stop`;
+
+> **Debug vs operational.** In debug mode the raw start/stop of every
+> integration is transmitted and stored; in operational mode only the
+> difference is. The PIC supports both in firmware (`M D`/`M P`); the Pico
+> has no mode command and *always* transmits start/stop — its operational
+> mode is derived by the driver on receipt. The mode of each archive is
+> recorded in `settings.json` → `measurement_info.acquisition_mode`; for
+> files without that field, infer it from the column layout above.
 - `timestamp` is seconds since the start of the measurement; overflowed
   samples are `NaN`.
 
@@ -472,6 +480,7 @@ itself does not change — only its interpretation and bookkeeping).
 | Field | Meaning |
 |---|---|
 | `timestamp_start` / `timestamp_end` | ISO-8601 timestamps of the first and last sample. |
+| `acquisition_mode` | `"debug"` (start/stop of each integration recorded) or `"operational"` (only the difference). **Frozen**. New archives always record it; in older files the mode must be inferred from the `data.csv` column layout. |
 | `is_problematic` | Flag set manually by the user to mark a measurement as suspect. *(editable)* |
 
 #### `experimental_setup` — *(editable, metadata)*

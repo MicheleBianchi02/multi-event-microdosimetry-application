@@ -35,6 +35,7 @@ def session():
 def test_settings_dict_v3(loaded_manager, session):
     settings = DataExporter.build_settings_dict(session, hardware_manager=loaded_manager)
     assert settings["file_format_version"] == "3.0"
+    assert settings["measurement_info"]["acquisition_mode"] == "operational"
     assert settings["experimental_setup"]["particle"] == session.particle
     hw = settings["hardware_settings"]
     assert hw["adc"]["bits"] == 12
@@ -86,3 +87,9 @@ def test_no_config_archive_still_valid(session, tmp_path):
     result = load_file(str(zip_path))
     assert result["settings"]["file_format_version"] == "3.0"
     assert result["embedded"] == {}
+
+
+def test_acquisition_mode_debug(session, tmp_path):
+    session.debug_mode = True
+    settings = DataExporter.build_settings_dict(session, hardware_manager=None)
+    assert settings["measurement_info"]["acquisition_mode"] == "debug"

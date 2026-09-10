@@ -71,6 +71,7 @@ class DataExporter:
             "measurement_info": {
                 "timestamp_start": t_start,
                 "timestamp_end": t_end,
+                "acquisition_mode": "debug" if getattr(session_model, 'debug_mode', False) else "operational",
                 "is_problematic": getattr(session_model, 'is_problematic', False)
             },
             "experimental_setup": {
