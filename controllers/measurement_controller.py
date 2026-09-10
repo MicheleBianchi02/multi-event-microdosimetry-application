@@ -251,6 +251,7 @@ class MeasurementController(QObject):
                 timing = settings.get("timing_settings", {})
                 self.session.int_time = timing.get("integration_time_s", self.session.int_time)
                 self.session.reset_time = timing.get("reset_time_s", self.session.reset_time)
+                self.session.period_s = timing.get("period_s", 0.0)
                 self.session.sample_freq = timing.get("sample_frequency_hz", self.session.sample_freq)
                 
                 # Restore measurement info
@@ -462,12 +463,12 @@ class MeasurementController(QObject):
         Sends the arm command to the hardware device to prepare for measurement.
         """
         if not self.running_view.simulate:
-            acq = self.hardware.hardware_manager.acquisition
-            if not acq:
-                QMessageBox.critical(self.running_view, "Error", "No acquisition hardware available.")
+            timing = self.hardware.hardware_manager.timing
+            if not timing:
+                QMessageBox.critical(self.running_view, "Error", "No timing hardware available.")
                 return
                 
-            response = acq.arm()
+            response = self.hardware.hardware_manager.arm()
             if not response:
                 QMessageBox.critical(
                     self.running_view, "Error", "Arming command failed."

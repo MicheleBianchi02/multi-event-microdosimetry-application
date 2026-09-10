@@ -120,6 +120,13 @@ class SetupController(QObject):
 
     def on_apply_configuration_requested(self, config: dict):
         hw_mgr = self.hardware.hardware_manager
+        # Session flags are derived from the hardware config, never from the
+        # (removed) UI toggles — also on the simulation path, so simulated
+        # data format matches the configured channel count.
+        self.session.debug_mode = True
+        num_active = len(hw_mgr.active_channels) if hw_mgr.is_loaded else 1
+        self.session.multiple_channel = (num_active > 1)
+
         if hw_mgr and hw_mgr.is_loaded:
             g1_label = config.get("gain_ch1_label")
             if g1_label:
@@ -142,23 +149,25 @@ class SetupController(QObject):
             self.time_window.on_configuration_result(False)
             logger.exception("Communication failed")
 
-    def on_timing_calculation_requested(self, int_time_s: float, reset_time_s: float):
-        timing_controller = self.hardware.hardware_manager.timing
-        if not timing_controller:
+    def on_timing_calculation_requested(self, int_time_s: float, reset_time_s: float, period_s: float = None):
+        hw_mgr = self.hardware.hardware_manager
+        if not hw_mgr.timing:
             logger.error("No timing controller assigned")
             return
-            
-        act_int_us, act_rst_us = timing_controller.calculate_actual_timing_us(
+
+        period_us = period_s * 1e6 if period_s is not None else None
+        # Via the manager: it injects the config's active channel count, which
+        # the PIC quantization (TX delay) depends on.
+        actual = hw_mgr.calculate_actual_timing(
             int_time_s * 1e6,
             reset_time_s * 1e6,
-            self.session.debug_mode,
-            self.session.multiple_channel,
+            period_us,
         )
-        self.session.int_time = act_int_us / 1e6
-        self.session.reset_time = act_rst_us / 1e6
-        period_s = (act_int_us + act_rst_us) / 1e6
-        self.session.sample_freq = 1 / period_s if period_s > 0 else 0
-        self.time_window.update_label()
+        self.session.int_time = actual.int_time_us / 1e6
+        self.session.reset_time = actual.reset_time_us / 1e6
+        self.session.period_s = actual.period_us / 1e6
+        self.session.sample_freq = actual.sample_frequency_hz
+        self.time_window.update_actual_timing(actual)
 
     def check_connection(self) -> list[str]:
         """Called when user presses 'Connect' or during auto-connect. Returns list of failed device IDs."""
@@ -173,56 +182,77 @@ class SetupController(QObject):
                 manager.set_event_mode(self.session.single_event)
 
     def send_timing_config(self, timer_params: dict) -> bool:
-        """Called when user presses 'Send' in the Time window."""
-        timing = self.hardware.hardware_manager.timing
+        """Called when user presses 'Send' in the Time window.
+
+        Ordered pipeline; every command's result is honoured. Mode and channel
+        count go first: the PIC's timer quantization (TX delay) depends on both,
+        so the device must know them before it receives the timer registers.
+        """
+        hw_mgr = self.hardware.hardware_manager
+        timing = hw_mgr.timing
         if not timing:
             return False
 
-        hw_mgr = self.hardware.hardware_manager
+        # Data mode: the app always acquires in debug mode (start/stop stored).
+        if not timing.set_mode(True):
+            logger.error("set_mode(debug) failed on the timing device")
+            return False
+        self.session.debug_mode = True
 
+        # Channel count: derived from the active channels of the hardware config.
+        num_active = len(hw_mgr.active_channels) if hw_mgr.is_loaded else 1
+        if not timing.set_channels(num_active > 1):
+            logger.error("set_channels failed on the timing device")
+            return False
+        self.session.multiple_channel = (num_active > 1)
+
+        # Timing registers.
+        period_us = timer_params.get("period_us")
         if timer_params.get("sample_ramp", False):
             if not hw_mgr.can_ramp_while_acquiring:
                 logger.error(
                     "Ramp sampling rejected: the timing device cannot generate "
                     "ramp triggers while acquiring."
                 )
-                self.time_window.on_configuration_result(False)
                 return False
             success = timing.configure_ramp(
                 timer_params.get("ramp_dt_us", 10.0),
                 timer_params["int_time_us"],
-                timer_params["reset_time_us"]
+                timer_params["reset_time_us"],
+                period_us=period_us,
             )
         else:
             success = timing.configure_noramp(
                 timer_params["int_time_us"],
-                timer_params["reset_time_us"]
+                timer_params["reset_time_us"],
+                period_us=period_us,
             )
-            
-        # Legacy PIC DAQ might still have these. For now we call them if they exist
-        # on the timing device, otherwise we ignore. 
-        if success and hasattr(timing, "set_mode"):
-            success = timing.set_mode(timer_params.get("debug_mode", False))
-            
-        if success and hasattr(timing, "set_channels"):
-            success = timing.set_channels(timer_params.get("multiple_channel", False))
+        if not success:
+            logger.error("Timing configuration rejected by the timing device")
+            return False
 
-        # Handle Gains
+        # Gains, atomically (B19). CH2 must have a selection whenever it is active.
         g1_label = timer_params.get("gain_ch1_label")
-        if success and g1_label:
-            success = hw_mgr.apply_gain(1, g1_label)
-            if success:
-                self.session.capacitance_pf_ch1 = hw_mgr.get_capacitance(1, g1_label)
-                self.session.gpio_mask_ch1 = hw_mgr.get_gain_mask(1, g1_label)
-
-        g2_label = timer_params.get("gain_ch2_label")
-        if success and g2_label:
-            success = hw_mgr.apply_gain(2, g2_label)
-            if success:
+        g2_label = timer_params.get("gain_ch2_label") if num_active > 1 else None
+        if num_active > 1 and not g2_label:
+            logger.error("CH2 is active in the hardware config but no CH2 gain was selected")
+            return False
+        if g1_label:
+            if not hw_mgr.apply_gains(g1_label, g2_label):
+                return False
+            self.session.capacitance_pf_ch1 = hw_mgr.get_capacitance(1, g1_label)
+            self.session.gpio_mask_ch1 = hw_mgr.get_gain_mask(1, g1_label)
+            if g2_label:
                 self.session.capacitance_pf_ch2 = hw_mgr.get_capacitance(2, g2_label)
                 self.session.gpio_mask_ch2 = hw_mgr.get_gain_mask(2, g2_label)
 
-        return success
+        # ADC input range.
+        if "input_range_min" in timer_params and "input_range_max" in timer_params:
+            if not hw_mgr.set_input_range(timer_params["input_range_min"], timer_params["input_range_max"]):
+                logger.error("set_input_range failed on the acquisition device")
+                return False
+
+        return True
 
     # --- Analysis Handlers ---
     def on_analysis_mode_changed(self, mode: str):

@@ -3,7 +3,7 @@ import threading
 import time
 import serial
 
-from hardware.interfaces import IDataAcquisition, ITimingController, IGainController
+from hardware.interfaces import IDataAcquisition, ITimingController, IGainController, ActualTiming
 from hardware.config.schema import ParameterBounds, RampSamplingConfig, TimingCapability
 from core.constants import OVERFLOW_VALUE
 
@@ -105,7 +105,7 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
 
     def set_channels(self, double_ch: bool) -> bool:
         # Pico API does not mention channel configuration.
-        logger.info("set_channels called but not implemented for Pico. Ignoring.")
+        logger.debug("set_channels called but not implemented for Pico. Ignoring.")
         return True
 
     def set_gpio_mask(self, gpio_mask: list[bool]) -> bool:
@@ -152,6 +152,26 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
             logger.error("reset time %s us out of hardware limits %s", reset_time_us, limits.reset_time_us)
             ok = False
         return ok
+
+    def calculate_actual_timing(
+        self,
+        int_time_us: float,
+        reset_time_us: float,
+        period_us: float = None,
+        num_channels: int = None,
+    ) -> ActualTiming:
+        # The Pico takes timings in physical units directly (microseconds):
+        # no quantization, and the channel count does not affect it.
+        act_int = float(int_time_us)
+        act_rst = float(reset_time_us)
+        period = float(period_us) if period_us is not None else (act_int + act_rst)
+        freq = 1e6 / period if period > 0 else 0.0
+        return ActualTiming(
+            int_time_us=act_int,
+            reset_time_us=act_rst,
+            period_us=period,
+            sample_frequency_hz=freq,
+        )
 
     def calculate_actual_timing_us(
         self, int_time_us: float, reset_time_us: float, debug_mode: bool = False, multiple_channel: bool = True
@@ -225,12 +245,12 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
 
     def set_mode(self, debug_mode: bool) -> bool:
         # Pico does not have an explicit debug mode command.
-        logger.info("set_mode called but not implemented for Pico. Ignoring.")
+        logger.debug("set_mode called but not implemented for Pico. Ignoring.")
         return True
 
     def arm(self) -> bool:
         # Pico does not require explicit arming.
-        logger.info("arm called but not implemented for Pico. Ignoring.")
+        logger.debug("arm called but not implemented for Pico. Ignoring.")
         return True
 
     def start_measurement(self, session_model, data_model) -> bool:

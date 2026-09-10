@@ -32,6 +32,7 @@ from hardware.config.gain_model import (
     build_channel_gain_model,
     channels_share_gain_device,
     combined_pin_states,
+    compatible_gain_options,
 )
 
 __all__ = [
@@ -58,6 +59,7 @@ __all__ = [
     "build_channel_gain_model",
     "channels_share_gain_device",
     "combined_pin_states",
+    "compatible_gain_options",
     "file_sha256",
     "hardware_config_from_dict",
     "load_hardware_config",

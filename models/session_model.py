@@ -24,11 +24,14 @@ class SessionModel(QObject):
         super().__init__()
         self._int_time = 1
         self._reset_time = 1
+        self._period_s = 0.0
         self._sample_freq = 1
         self._file_path = None
         self._tx_delay = TX_DELAY_PRO_DOUBLE
         self._multiple_channel = True
-        self._debug_mode = False
+        # The app always acquires in debug mode (start/stop stored); it is
+        # only set to False while an old operational-mode archive is loaded.
+        self._debug_mode = True
 
         self.baud_rate = 115200
         self.port = None
@@ -117,6 +120,16 @@ class SessionModel(QObject):
     @sample_freq.setter
     def sample_freq(self, value):
         self._sample_freq = value
+
+    @property
+    def period_s(self):
+        """The actual (quantized) measurement period in seconds, as reported
+        by the timing driver (0.0 = unknown — derive from int + reset)."""
+        return self._period_s
+
+    @period_s.setter
+    def period_s(self, value):
+        self._period_s = value
 
     @property
     def file_path(self):

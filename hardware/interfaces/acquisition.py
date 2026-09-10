@@ -1,14 +1,17 @@
 from abc import ABC, abstractmethod
 
+
 class IDataAcquisition(ABC):
     """
     Interface for data acquisition hardware (e.g., ADCs).
     """
 
-    @abstractmethod
     def arm(self) -> bool:
-        """Arm the device for measurement."""
-        pass
+        """
+        Optional / legacy arm hook for the acquisition device.
+        Primary arming is owned by ITimingController.
+        """
+        return True
 
     @abstractmethod
     def start_measurement(self, session_model, data_model) -> bool:
@@ -27,3 +30,10 @@ class IDataAcquisition(ABC):
         Example: {'bits': 12, 'vref': 5.0, 'supports_oversampling': False}
         """
         pass
+
+    def set_input_range(self, min_volts: float, max_volts: float) -> bool:
+        """
+        Configure the active voltage span for the ADC.
+        Returns True if successful or if range is fixed.
+        """
+        return True

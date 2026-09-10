@@ -177,7 +177,7 @@ Severity scale:
 - Not fixed yet: the connection/transport handling is being reworked first
   (deferred with the auto-connect work, B2).
 
-### B19 — Gain application on shared GPIO pins is sequential, not atomic
+### B19 — Gain application on shared GPIO pins is sequential, not atomic — **FIXED**
 - **Intended:** when the same uC controls the gain of two circuits, the
   shared pins must be accounted for as *one physical switch*: the merged pin
   state for the pair (CH1 + CH2) is computed first, validated, and then sent
@@ -205,9 +205,19 @@ Severity scale:
 - **Fix direction:** compute the merged per-pin state for both channels
   before touching anything; reject the pair as a whole; send each device
   once. Wire the wizard to the pair-level apply.
-- Deferred: to be fixed together with the gain-handling rework.
+- **Fixed (2026-09-10):** `HardwareManager.apply_gains(ch1_label, ch2_label)`
+  merges requested pin states across all active channels and validates shared-pin
+  agreement *before* touching hardware. If a conflict occurs, the request is
+  rejected with no pin toggled and internal states remain intact. On success,
+  each unique physical device receives `set_gpio_mask` exactly once. The UI
+  dynamically filters CH2 options against CH1, requires a selection for every
+  active channel, and badges ganged channels. Residual case: if one device
+  accepts while another rejects, the bench state is unknowable —
+  `HardwareManager.gain_state_unknown` is raised and the configuration must be
+  applied again (the wizard shows this in the status bar).
+  Regression tests: `tests/test_hardware_manager.py`.
 
-### B20 — Gain table drops capacitors that share a pin
+### B20 — Gain table drops capacitors that share a pin — **FIXED**
 - **Intended:** a pin may drive several switchable capacitors of a circuit
   (the loader allows it and warns "they switch together"); the gain table
   must treat the pin's capacitors as a group contributing the *sum* of their
@@ -226,7 +236,11 @@ Severity scale:
   ({pin: [capacitors]}) and let each pin's combination contribute the sum
   of its group's values; the gpio_mask semantics (one bit per pin) are
   unchanged.
-- Deferred: to be fixed together with the gain-handling rework.
+- **Fixed (2026-09-10):** `channel_routing` in `hardware/config/gain_model.py`
+  groups capacitors per pin (`edges.setdefault(pin, []).append(...)`). Each
+  pin state in a gain option sums all wired capacitors.
+  Regression test: `tests/test_hardware_manager.py`
+  (`test_b20_multiple_capacitors_summed_per_pin`).
 
 ### B9 — `PICSerialDAQ.configure_ramp` is defined twice; the surviving one returns success — **FIXED**
 - `hardware/pic/pic_daq.py:171` returns `False` (unsupported), but the second

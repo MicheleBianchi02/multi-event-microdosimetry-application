@@ -234,12 +234,11 @@ of that circuit*. Rules:
   constrains what CH2 can be). A wiring may also mix shared and
   circuit-specific pins; per shared pin, the two channels' selections must
   agree.
-- **Known limitation** (tracked in BUG.md, B19/B20): gain selections are
-  currently applied per channel sequentially rather than as one merged
-  per-pin state, and a pin driving several capacitors of the same circuit
-  contributes only the last wired capacitor to the gain table. Both are
-  deferred to the gain-handling rework — check BUG.md before relying on
-  shared-pin wirings.
+- **Shared and grouped pins (atomic apply & summing):** gain selections are
+  applied atomically across all active channels: the merged pin state is validated
+  before any pin is toggled, preventing conflicting bench states. Multiple
+  capacitors wired to the same pin are grouped and contribute the sum of their
+  capacitances to the gain table.
 
 ### 2.6 Validation
 

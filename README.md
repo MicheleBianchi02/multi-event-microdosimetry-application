@@ -82,15 +82,24 @@ Key rules of the schema:
   (layer 2, drives the UI). At load time the declared envelope is checked to
   lie within the hardcoded limits; on mismatch the load fails with an error
   popup listing every problem and nothing connects. Declaring *tighter* bounds
-  than the hardware allows is legal (campaign restriction).
+  than the hardware allows is legal (campaign restriction). In the wizard the
+  declared envelope bounds the input fields: out-of-range times and ramp dt
+  are highlighted and block *Apply Configuration*, and parameters fixed by the
+  firmware are shown read-only.
 - **Gain pins**: a device declares its GPIO pins in gpio-mask order; the gain
   tables are derived from the connections, so they contain only combinations
   the wiring actually supports. A circuit may hold more switchable capacitors
   than its controller can drive: unwired ones are excluded from the gain
   table (warning at load), while wiring that contradicts the declared pins or
   roles is a load error. When the same device drives both circuits (ganged
-  pins), the two channels' masks must agree on shared pins: the UI links the
-  selections and conflicting pairs are rejected.
+  pins), the two channels' masks must agree on shared pins: the pair is
+  validated and applied atomically — one `set_gpio_mask` per physical device,
+  conflicting pairs rejected before any pin moves. If a device rejects the
+  command after another already switched, the bench state is unknown
+  (`HardwareManager.gain_state_unknown`) and the configuration must be
+  applied again. A pin may also drive several capacitors of the same circuit;
+  they switch together and contribute the *sum* of their values to the gain
+  table.
 - **Acquisition** declares `num_channels` (the binding constraint for how many
   channels can be measured — a device may time two channels but acquire one)
   and the ADC: `bits` and `input_ranges_volts` (a non-empty list; more than one
@@ -138,25 +147,28 @@ disabled with an explanatory tooltip.
 
 | Method | Contract |
 |---|---|
-| `supports_ramp_sampling` | Whether the controller can generate ramp sampling triggers. Gates the ramp UI. |
+| `supports_ramp_sampling` | Property. Whether the controller can generate ramp sampling triggers. Gates the ramp UI. |
 | `configure_noramp(int_time_us, reset_time_us, period_us=None)` | Configure integration and reset times for a standard measurement. Arguments are validated against the driver's hardcoded limits and rejected if out of bounds. |
 | `configure_ramp(ramp_dt_us, int_time_us, reset_time_us, period_us=None)` | Configure ramp sampling: trigger interval, integration and reset times, all in one call. |
-| `calculate_actual_timing_us(int_time_us, reset_time_us, ...)` | Return the *actual* (quantized) integration and reset times the hardware will use for a target pair of times (µs in, µs out). |
+| `calculate_actual_timing(int_time_us, reset_time_us, period_us=None, num_channels=None)` | Pure computation (no serial traffic — the UI calls it on every input change). Returns `ActualTiming` with the fields `int_time_us`, `reset_time_us`, `period_us` (µs) and `sample_frequency_hz`; `HardwareManager.calculate_actual_timing` injects the config's active channel count, which the quantization of some firmware depends on (the PIC's TX delay). |
+| `arm()` | Prepare the timing system for measurement (acts as an integrator reset to clear residual charge). Devices that need no arming implement it as a no-op (the Pico). |
+| `set_channels(multiple_channel)` | Tell the timing controller whether one or both channels are active — the command is sent even though the channel count itself comes from the config. No-op on devices that don't need it (the Pico). |
+| `set_mode(debug_mode)` | Select the transmission mode of the electronics (debug: start/stop stored; operational: only the difference). The app always sends debug; devices without a mode command no-op (the Pico). |
 
 #### IGainController (`hardware/interfaces/gain.py`)
 
 | Method | Contract |
 |---|---|
 | `set_gpio_mask(gpio_mask)` | Apply the state of **every declared pin of this device**, one bool per pin in the config's pin order. Which pin switches which capacitor is routing knowledge resolved by the `HardwareManager` from the config's connections. Masks of the wrong length are rejected. |
-| `set_event_mode(is_single_event)` | The SE/ME line of the electronics is owned by the *gain* controllers. Switching mode calls this on **all** gain controllers (via `HardwareManager.set_event_mode`), so every circuit receives the signal (low = ME, high = SE today). A future extension will allow ME on one detector and SE on the other (per-channel event mode). |
+| `set_event_mode(is_single_event)` | The SE/ME line of the electronics is owned by the *gain* controllers. Switching mode calls this on **all** unique gain controllers (via `HardwareManager.set_event_mode`), so every circuit receives the signal (low = ME, high = SE today). A future extension will allow ME on one detector and SE on the other (per-channel event mode). |
 
 #### IDataAcquisition (`hardware/interfaces/acquisition.py`)
 
 | Method | Contract |
 |---|---|
-| `arm()` | Prepare the device for measurement (no-op if unsupported). |
 | `start_measurement(session_model, data_model)` | Start the stream. The driver owns its reader thread and appends converted samples directly to `data_model`. |
 | `stop_measurement()` | Stop the stream and join the reader thread. |
+| `set_input_range(min_volts, max_volts)` | Set the ADC voltage input range (for instruments supporting selectable ranges). |
 | `get_adc_settings()` | Properties of the ADC. The authoritative values come from the loaded hardware config (`HardwareManager.get_adc_settings()`: bits, effective input range, channel count); the archived snapshot is used when re-loading a measurement. |
 
 > The concrete driver implementations (Pico, PIC) are being reworked; their
@@ -212,16 +224,21 @@ Four estimators are computed over the (ROI-filtered) data, each with uncertainti
    **Step 2**.
 3. **Timing, gain and metadata configuration.** A physics planning page (Bragg /
    SOBP curves from FLUKA data, gas multiplication factor g, integration-time and
-   measurement-time limits) helps choosing the integration time; the manual page
-   lets the user set integration and reset time (the app shows the *actual* times
-   the hardware will use), the operational mode (debug: start/stop stored
-   separately; operational: only the difference), single/dual channel, the gain of
-   each channel (from the computed gain table), the ramp sampling option (only if
-   the timing controller supports it) and the per-measurement metadata (beam
-   energy/current, detector voltage, depth, note). "Apply Configuration" sends the
-   timing to the `timing` role and the gain masks to the `gain_ch1`/`gain_ch2`
-   roles *before* any measurement starts.
-4. **Measurement.** `ARM` then `START` (at least 3 s apart). Live dashboard:
+   measurement-time limits) helps choosing the integration time; the setup page
+   lets the user set integration time, reset time, and (if declared configurable in
+   the hardware JSON) period. The active channel count is governed directly by the
+   configuration's `channels` section, and acquisition operates strictly in debug
+   mode (recording start and stop samples). A live summary card displays the *actual*
+   (quantized) hardware times ($T_{\text{int}}$, $T_{\text{rst}}$, $T_{\text{period}}$,
+   $f_{\text{sample}}$). Gain selection supports independent and shared GPIO topologies:
+   choosing CH1 dynamically filters compatible CH2 selections, and ganged pins are
+   badged. Ramp sampling is available if supported by the timing controller and
+   not mutually exclusive with acquisition. "Apply Configuration" atomically applies
+   the merged pin states to `gain_ch1`/`gain_ch2` (updating each physical device once),
+   configures ADC input range, and sends the timing parameters and active channel count
+   to the `timing` role *before* any measurement starts.
+4. **Measurement.** `ARM` then `START` (at least 3 s apart). `ARM` triggers an
+   integrator reset via the `timing` controller to clear residual charge. Live dashboard:
    histograms (MCA), time series, rolling statistics table, FFT / moving average,
    interactive time ROIs and channel ROIs, calibration tool, metadata editing.
    `STOP` ends the acquisition.
@@ -315,8 +332,7 @@ severities in [BUG.md](BUG.md)):
 | 1 | Connection handling | per-device auto-connect (one udev rule per device) with manual fallback | connect-all only; a manual dialog maps one device at a time; `verify_connection` still unused | B2 |
 | 2 | ADC bit depth in `DataModel` | histogram bins/overflow derived from the ADC bits | bits/range flow from the config into the archives, but `DataModel` still uses fixed 12-bit bins | B6 |
 | 3 | Ramp sampling | ramp samples acquired and stored | timing triggers only; acquisition side not implemented (deferred by design, not a bug) | — |
-| 4 | Gain handling on shared pins | pair-level atomic apply; per-pin groups summed in the gain table | sequential per-channel apply (partial bench states possible); a pin driving several capacitors keeps only the last one in the table — deferred with the gain rework | B19, B20 |
-| 5 | Dead legacy code | removed | superseded drivers in `services/`, unused ACF/PACF, `if False:` block remain | B17 |
+| 4 | Dead legacy code | removed | superseded drivers in `services/`, unused ACF/PACF, `if False:` block remain | B17 |
 
 ## 6. Open design points
 
@@ -332,12 +348,11 @@ severities in [BUG.md](BUG.md)):
   side is ready).
 - **Connection verification**: whether the `verify_connection` (`V`) handshake
   is part of the connect flow or is removed — to be decided.
-- **Debug-only run path (decided, deferred)**: the application will always
-  acquire in debug mode (start/stop recorded). The Pico natively transmits
-  start/stop and has no mode command; the PIC supports both via `M D`/`M P`.
-  Remaining work: remove the Operational choice from the wizard, always use
-  the debug TX-delay constants on the PIC, keep the 3-column loader for old
-  files. Archives already record `measurement_info.acquisition_mode`.
+- **Debug-only run path**: the application always acquires in debug mode (start/stop
+  recorded). Operational mode and single-channel toggles have been removed from the
+  setup UI: channel count is governed by the hardware config, and acquisition operates
+  strictly in debug mode. Archives record `measurement_info.acquisition_mode = "debug"`.
+  Old 3-column operational files remain supported by the offline loader.
 - **Multi file analysis**: the user can analyze multiple measurements at the same
   time (e.g. create a graph of the yD against depth or beam current).
 - **Oversampling**: ADC oversampling could be used to reduce noise.

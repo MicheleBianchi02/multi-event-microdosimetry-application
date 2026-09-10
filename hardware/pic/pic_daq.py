@@ -5,7 +5,7 @@ import serial
 import serial.tools.list_ports
 import numpy as np
 
-from hardware.interfaces import IDataAcquisition, ITimingController, IGainController
+from hardware.interfaces import IDataAcquisition, ITimingController, IGainController, ActualTiming
 from hardware.config.schema import ParameterBounds, RampSamplingConfig, TimingCapability
 from core.constants import OVERFLOW_VALUE
 
@@ -55,6 +55,9 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
         
         # We store these when calculate_actual_timing is called so we can just use them in configure_noramp
         self._last_timer_params = None
+        # Channel count last accepted via set_channels (True = both channels);
+        # fallback for calculate_actual_timing when no count is passed.
+        self._last_multiple_channel = True
 
     def connect(self) -> bool:
         to_open = False
@@ -132,7 +135,12 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
         while response != b"D" and time.time() < operation_timeout:
             with self._lock:
                 response = self.serial.read(1)
-        return self._check_response("D", response, "Changing channels")
+        ok = self._check_response("D", response, "Changing channels")
+        if ok:
+            # The TX delay of the reset phase depends on the channel count,
+            # so the quantization math must follow the device state.
+            self._last_multiple_channel = bool(double_ch)
+        return ok
 
     def set_gpio_mask(self, gpio_mask: list[bool]) -> bool:
         if len(gpio_mask) != self.GAIN_MAX_PINS or not all(isinstance(b, bool) for b in gpio_mask):
@@ -191,6 +199,32 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
             logger.error("reset time %s us out of hardware limits %s", reset_time_us, limits.reset_time_us)
             ok = False
         return ok
+
+    def calculate_actual_timing(
+        self,
+        int_time_us: float,
+        reset_time_us: float,
+        period_us: float = None,
+        num_channels: int = None,
+    ) -> ActualTiming:
+        # The TX delay inserted during the reset phase depends on both the
+        # mode (always debug in this app) and the active channel count, so
+        # the quantization must know how many channels the device reports.
+        if num_channels is None:
+            multiple_channel = self._last_multiple_channel
+        else:
+            multiple_channel = num_channels > 1
+        act_int, act_rst = self.calculate_actual_timing_us(
+            int_time_us, reset_time_us, debug_mode=True, multiple_channel=multiple_channel
+        )
+        period = act_int + act_rst
+        freq = 1e6 / period if period > 0 else 0.0
+        return ActualTiming(
+            int_time_us=act_int,
+            reset_time_us=act_rst,
+            period_us=period,
+            sample_frequency_hz=freq,
+        )
 
     def calculate_actual_timing_us(
         self, int_time_us: float, reset_time_us: float, debug_mode: bool = False, multiple_channel: bool = True
@@ -260,7 +294,9 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
             return False
 
         if self._last_timer_params is None:
-            self._quantize_timing(int_time_us, reset_time_us, False, True)
+            # Fallback when no calculation ran first: quantize with the
+            # mode/channel state the device was last given.
+            self._quantize_timing(int_time_us, reset_time_us, True, self._last_multiple_channel)
             
         timerU_int, timerH_int, timerL_int, timerH_reset, timerL_reset = self._last_timer_params
 

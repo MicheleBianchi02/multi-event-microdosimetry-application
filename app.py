@@ -33,7 +33,9 @@ class AppController(QObject):
         self.session_model = SessionModel()
         self.session_model.baud_rate = baud_rate
         self.session_model.multiple_channel = not single_channel
-        self.session_model.debug_mode = False
+        # The app always acquires in debug mode (start/stop stored); the
+        # operational mode of the electronics is never used.
+        self.session_model.debug_mode = True
         self.data_model = DataModel()
 
         # Initialize Hardware

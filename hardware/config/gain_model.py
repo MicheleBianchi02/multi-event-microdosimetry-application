@@ -56,7 +56,8 @@ def channel_routing(config: HardwareConfig, channel: str) -> dict:
     """Resolve the pin -> capacitor routing of one channel, in gpio-mask order.
 
     Returns {device_id: [(pin_id, capacitor_id, value_pF), ...]} with each
-    list ordered like the device's declared pins.
+    list ordered like the device's declared pins. If a pin drives multiple
+    capacitors of the same circuit, their capacitances are summed (B20).
     """
     channel_cfg = config.channels[channel]
     circuit = config.circuits[channel_cfg.circuit]
@@ -64,16 +65,18 @@ def channel_routing(config: HardwareConfig, channel: str) -> dict:
     gain_dev = config.devices[gain_dev_id]
 
     capacitors = {c.id: c for c in circuit.switchable_capacitors}
-    edges: dict = {pin: None for pin in gain_dev.gain.pins}
+    edges: dict = {pin: [] for pin in gain_dev.gain.pins}
     for conn in config.connections:  # validated: exactly one edge per capacitor
         if conn.circuit == circuit.id and conn.capacitor in capacitors:
-            edges[conn.pin] = capacitors[conn.capacitor]
+            edges.setdefault(conn.pin, []).append(capacitors[conn.capacitor])
 
     routing = {gain_dev_id: []}
     for pin in gain_dev.gain.pins:  # gpio-mask order
-        capacitor = edges.get(pin)
-        if capacitor is not None:
-            routing[gain_dev_id].append((pin, capacitor.id, capacitor.value_pF))
+        caps = edges.get(pin, [])
+        if caps:
+            total_val = sum(c.value_pF for c in caps)
+            cap_ids = "+".join(c.id for c in caps)
+            routing[gain_dev_id].append((pin, cap_ids, total_val))
     return routing
 
 
@@ -138,10 +141,12 @@ def combined_pin_states(options: list) -> Optional[dict]:
 
     Returns None on conflict: two options requesting different states on the
     same pin of the same device (ganged pins with disagreeing channel gains
-    — physically impossible).  Otherwise {device_id: {pin_index: bool}}.
+    — physically impossible). Otherwise {device_id: {pin_index: bool}}.
     """
     merged: dict = {}
     for option in options:
+        if option is None:
+            continue
         for device_id, states in option.pin_states.items():
             current = merged.setdefault(device_id, {})
             for pin_index, on in states.items():
@@ -149,3 +154,15 @@ def combined_pin_states(options: list) -> Optional[dict]:
                     return None  # conflict on a shared pin
                 current[pin_index] = on
     return merged
+
+
+def compatible_gain_options(
+    model: ChannelGainModel, other_option: Optional[GainOption]
+) -> list[GainOption]:
+    """Return all options of `model` that are physically compatible with `other_option`."""
+    if other_option is None:
+        return list(model.options)
+    return [
+        opt for opt in model.options
+        if combined_pin_states([opt, other_option]) is not None
+    ]

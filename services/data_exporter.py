@@ -91,7 +91,10 @@ class DataExporter:
             "timing_settings": {
                 "integration_time_s": getattr(session_model, 'int_time', 0.0),
                 "reset_time_s": getattr(session_model, 'reset_time', 0.0),
-                "period_s": getattr(session_model, 'int_time', 0.0) + getattr(session_model, 'reset_time', 0.0),
+                # The driver-reported actual period; falls back to int + reset
+                # (the relationship of the current firmware generations).
+                "period_s": getattr(session_model, 'period_s', 0.0)
+                or getattr(session_model, 'int_time', 0.0) + getattr(session_model, 'reset_time', 0.0),
                 "sample_frequency_hz": getattr(session_model, 'sample_freq', 0.0)
             },
             "analysis": {
