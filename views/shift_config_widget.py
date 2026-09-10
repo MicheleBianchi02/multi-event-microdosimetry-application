@@ -309,8 +309,9 @@ class ShiftConfigWidget(QWidget):
 
     def on_save_clicked(self):
         self.update_session_from_fields()
+        default_path = ShiftService.suggest_setup_path(self.session)
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Create/Save Workspace Setup", "", "JSON Files (*.json)"
+            self, "Create/Save Workspace Setup", default_path, "JSON Files (*.json)"
         )
         if file_path:
             if not file_path.endswith(".json"):

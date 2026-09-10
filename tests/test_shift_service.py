@@ -96,3 +96,13 @@ def test_particle_saved_and_loaded(session, tmp_path):
     third = SessionModel()
     assert ShiftService.load_setup(third, str(legacy))
     assert third.particle == "Proton"
+
+
+def test_suggested_setup_path(session, tmp_path):
+    # fresh session: conventional name, no folder
+    assert ShiftService.suggest_setup_path(session) == "setup.json"
+
+    # with an active workspace: folder + remembered setup file name
+    assert ShiftService.save_setup(session, str(tmp_path / "campaign_setup.json"))
+    suggested = ShiftService.suggest_setup_path(session)
+    assert suggested == os.path.join(str(tmp_path), "campaign_setup.json")

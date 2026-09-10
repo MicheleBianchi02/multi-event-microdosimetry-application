@@ -151,6 +151,14 @@ class ShiftService:
             return {}
 
     @staticmethod
+    def suggest_setup_path(session_model) -> str:
+        """Default path offered when saving a workspace setup: the active
+        workspace's setup file, or the conventional "setup.json" name."""
+        name = getattr(session_model, "setup_file_name", None) or "setup.json"
+        workspace = getattr(session_model, "active_workspace_dir", None)
+        return os.path.join(workspace, name) if workspace else name
+
+    @staticmethod
     def check_for_recovery(folder_path: str) -> bool:
         """Checks if there are orphaned temp files in the given workspace directory."""
         csv_tmp = os.path.join(folder_path, ".active_run.csv.tmp")
