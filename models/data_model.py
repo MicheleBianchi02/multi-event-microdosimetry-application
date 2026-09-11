@@ -37,6 +37,11 @@ class DataModel:
 
         self.ptr = 0
 
+        # last applied FFT-analysis dialog parameters (excluded_bands,
+        # threshold, method, window, nperseg); empty until the user runs the
+        # analysis
+        self.fft_analysis_params = {}
+
         self.result = {
             "var": {
                 "N": [0, 0, 0, 0],
@@ -67,6 +72,13 @@ class DataModel:
                 "Covariance": [0, 0, 0, 0],
                 "y_bar_d": [0, 0, 0, 0],
                 "cov_mean_sq": [0, 0, 0, 0],
+            },
+            "var_fft": {
+                "N": [0, 0, 0, 0],
+                "Mean": [0, 0, 0, 0],
+                "Variance": [0, 0, 0, 0],
+                "Covariance": [0, 0, 0, 0],
+                "y_bar_d": [0, 0, 0, 0],
             },
         }
 
@@ -111,6 +123,9 @@ class DataModel:
             self.count_ch1 = 0
             self.count_ch2 = 0
 
+            # a new measurement starts without FFT-analysis input
+            self.fft_analysis_params = {}
+
             self.result = {
                 "var": {
                     "N": [0, 0, 0, 0],
@@ -141,6 +156,13 @@ class DataModel:
                     "Covariance": [0, 0, 0, 0],
                     "y_bar_d": [0, 0, 0, 0],
                     "cov_mean_sq": [0, 0, 0, 0],
+                },
+                "var_fft": {
+                    "N": [0, 0, 0, 0],
+                    "Mean": [0, 0, 0, 0],
+                    "Variance": [0, 0, 0, 0],
+                    "Covariance": [0, 0, 0, 0],
+                    "y_bar_d": [0, 0, 0, 0],
                 },
             }
 

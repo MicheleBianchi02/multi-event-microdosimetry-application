@@ -30,7 +30,12 @@ import numpy as np
 import pytest
 
 # the repo root is on sys.path via the root conftest.py
-from core.calc_stat import calculate_results
+from core.calc_stat import (
+    calculate_fft_block,
+    calculate_results,
+    compute_spectrum,
+    find_spectral_peaks,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -671,30 +676,45 @@ class TestOutputStructure:
 
 
 class TestCovBothChannelsGuard:
-    """cov_both_ch=True with a missing channel must raise a clear exception."""
+    """cov_both_ch=True with a missing channel silently zeroes var_doublecov."""
 
-    def test_raises_when_ch1_disabled(self):
+    @staticmethod
+    def _assert_var_doublecov_all_zero(res):
+        for key, values in res["var_doublecov"].items():
+            assert values == [0, 0, 0, 0], f"var_doublecov['{key}'] not zeroed"
+
+    def test_var_doublecov_zeroed_when_ch1_disabled(self):
+        np.random.seed(42)
         data = np.column_stack(
             (
                 np.random.normal(10, 2, 50),
                 np.random.normal(5, 1, 50)
         )
         )
-        with pytest.raises(
-            Exception,
-            match="Can't calculate covariance between the two channels if one is not used"
-        ):
-            calculate_results(data, ch1=False, cov_both_ch=True)
+        res = calculate_results(data, ch1=False, cov_both_ch=True)
 
-    def test_raises_when_ch2_disabled(self):
+        self._assert_var_doublecov_all_zero(res)
+        # the enabled channel is still processed by the single-channel methods
+        assert res["var"]["N"][0] == 0
+        assert res["var"]["N"][2] == 50
+        assert res["var"]["Mean"][2] != 0
+        assert res["var_cov"]["N"][2] > 0
+
+    def test_var_doublecov_zeroed_when_ch2_disabled(self):
+        np.random.seed(42)
         data = np.column_stack(
             (
                 np.random.normal(10, 2, 50),
                 np.random.normal(5, 1, 50)
         )
         )
-        with pytest.raises(Exception):
-            calculate_results(data, ch2=False, cov_both_ch=True)
+        res = calculate_results(data, ch2=False, cov_both_ch=True)
+
+        self._assert_var_doublecov_all_zero(res)
+        assert res["var"]["N"][2] == 0
+        assert res["var"]["N"][0] == 50
+        assert res["var"]["Mean"][0] != 0
+        assert res["var_cov"]["N"][0] > 0
 
     def test_var_doublecov_populated_when_both_enabled(self):
         np.random.seed(42)
@@ -773,3 +793,406 @@ class TestBootstrapErrorHandling:
         assert res["var_cov"]["Covariance"][1] == 0.0
         assert res["var_autocov"]["AutoCorrelation"][1] == 0.0
 
+
+
+# ---------------------------------------------------------------------------
+# var_fft — frequency-domain variance–covariance estimator
+# ---------------------------------------------------------------------------
+
+FS = 1000.0        # Hz
+N_FFT = 100_000    # samples
+
+
+def _synth_from_psd(level, rng, lines=(), offset=0.0, fs=FS, n=N_FFT):
+    """Build a time series with a prescribed one-sided PSD.
+
+    level : callable f(Hz) -> PSD level (units^2/Hz) for the broadband part
+    lines : iterable of (frequency_hz, variance) discrete components
+    """
+    freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+    amp = 0.5 * np.sqrt(level(freqs) * fs * n)
+    Z = (rng.standard_normal(freqs.size) + 1j * rng.standard_normal(freqs.size)) * amp
+    Z[0] = 0.0
+    if n % 2 == 0:
+        Z[-1] = 0.0
+    for f0, var in lines:
+        k = int(round(f0 * n / fs))
+        Z[k] += n * np.sqrt(var / 2.0) * np.exp(1j * rng.uniform(0, 2 * np.pi))
+    y = np.fft.irfft(Z, n)
+    return y - y.mean() + offset
+
+
+class TestVarFftDefaults:
+    """calc_fft disabled (default) or unusable -> the section stays zeroed."""
+
+    def test_disabled_by_default_all_zero(self):
+        np.random.seed(1)
+        data = np.column_stack(
+            (np.random.normal(50, 2, 500), np.random.normal(50, 2, 500))
+        )
+        res = calculate_results(data, calc_bootstrap=False)
+        for key in ("N", "Mean", "Variance", "Covariance", "y_bar_d"):
+            assert res["var_fft"][key] == [0, 0, 0, 0], f"var_fft['{key}'] not zero"
+
+    def test_enabled_without_sample_freq_zeroed(self):
+        np.random.seed(1)
+        data = np.column_stack(
+            (np.random.normal(50, 2, 500), np.random.normal(50, 2, 500))
+        )
+        res = calculate_results(data, calc_bootstrap=False, calc_fft=True)
+        assert res["var_fft"]["N"] == [0, 0, 0, 0]
+
+    def test_empty_band_zeroed(self):
+        rng = np.random.default_rng(2)
+        y = _synth_from_psd(lambda f: 0.008, rng, offset=50.0)
+        data = np.column_stack((y, y))
+        # band entirely above Nyquist -> no kept bin -> not computed
+        res = calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS,
+            fft_bands=[(600.0, 700.0)],
+        )
+        assert res["var_fft"]["N"] == [0, 0, 0, 0]
+
+
+class TestVarFftWhiteNoise:
+    """Pure white noise: Parseval-exact variance, cov ~ 0, y_bar_d = white/mean."""
+
+    WHITE_VAR = 4.0
+    LVL = WHITE_VAR / (FS / 2)   # 0.008 units^2/Hz
+
+    def _run(self, **kwargs):
+        rng = np.random.default_rng(3)
+        y = _synth_from_psd(lambda f: self.LVL, rng, offset=50.0)
+        data = np.column_stack((y, y))
+        return calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS, **kwargs
+        ), y
+
+    def test_parseval_variance_matches_time_domain(self):
+        res, y = self._run()
+        assert res["var_fft"]["Variance"][0] == pytest.approx(
+            np.var(y, ddof=0), rel=1e-8
+        )
+
+    def test_covariance_near_zero(self):
+        res, _ = self._run()
+        assert res["var_fft"]["Covariance"][0] == pytest.approx(0.0, abs=0.2)
+
+    def test_y_bar_d_is_white_over_mean(self):
+        res, _ = self._run()
+        assert res["var_fft"]["Mean"][0] == pytest.approx(50.0, abs=0.1)
+        assert res["var_fft"]["y_bar_d"][0] == pytest.approx(
+            self.WHITE_VAR / 50.0, rel=0.05
+        )
+
+    def test_n_and_uncertainty_slots(self):
+        res, _ = self._run()
+        assert res["var_fft"]["N"][0] == N_FFT
+        assert res["var_fft"]["N"][2] == N_FFT
+        for key in ("N", "Mean", "Variance", "Covariance", "y_bar_d"):
+            assert res["var_fft"][key][1] == 0
+            assert res["var_fft"][key][3] == 0
+
+    def test_nan_samples_dropped(self):
+        rng = np.random.default_rng(4)
+        y = _synth_from_psd(lambda f: self.LVL, rng, offset=50.0)
+        y[50_000:53_000] = np.nan
+        data = np.column_stack((y, y))
+        res = calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS
+        )
+        assert res["var_fft"]["N"][0] == N_FFT - 3000
+        assert res["var_fft"]["y_bar_d"][0] * 50.0 == pytest.approx(
+            self.WHITE_VAR, rel=0.05
+        )
+
+
+class TestVarFftBandExclusion:
+    """Floor L below 100 Hz, 3L plateau above, 0.5-variance line at 250 Hz.
+
+    true: white = 4.0, plateau excess = 6.4, line = 0.5, total = 10.9.
+    The band is used ONLY for the floor: variance/covariance stay global.
+    """
+
+    LVL = 0.008
+
+    def _run(self, **kwargs):
+        rng = np.random.default_rng(5)
+        y = _synth_from_psd(
+            lambda f: np.where(f < 100.0, self.LVL, 3 * self.LVL),
+            rng,
+            lines=[(250.0, 0.5)],
+            offset=50.0,
+        )
+        data = np.column_stack((y, y))
+        return calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS, **kwargs
+        ), y
+
+    def test_band_exclusion_recovers_white_and_cov(self):
+        res, y = self._run(fft_bands=[(0.0, 100.0)])
+        white = res["var_fft"]["y_bar_d"][0] * 50.0
+        assert white == pytest.approx(4.0, rel=0.05)
+        assert res["var_fft"]["Variance"][0] == pytest.approx(np.var(y, ddof=0), rel=1e-8)
+        assert res["var_fft"]["Covariance"][0] == pytest.approx(6.9, abs=0.5)
+
+    def test_threshold_clipped_floor(self):
+        # clip at 8x the floor level: protects L if a peak lurks inside the band
+        res, _ = self._run(fft_bands=[(0.0, 100.0)], fft_threshold=8 * self.LVL)
+        white = res["var_fft"]["y_bar_d"][0] * 50.0
+        assert white == pytest.approx(4.0, rel=0.02)
+
+    def test_no_band_overestimates_white(self):
+        # the plateau is below any sensible threshold: without band exclusion
+        # the floor absorbs it and white is heavily overestimated (documents
+        # why fft_bands exists)
+        res, _ = self._run()
+        white = res["var_fft"]["y_bar_d"][0] * 50.0
+        assert white > 2 * 4.0
+
+
+class TestVarFftOptions:
+    """Welch / Hann / per-channel behaviour of the FFT estimator."""
+
+    LVL = 0.008  # white var 4.0
+
+    def test_welch_recovers_white(self):
+        rng = np.random.default_rng(6)
+        y = _synth_from_psd(lambda f: self.LVL, rng, offset=50.0)
+        data = np.column_stack((y, y))
+        res = calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS,
+            fft_method="welch", fft_nperseg=8192,
+        )
+        assert res["var_fft"]["y_bar_d"][0] * 50.0 == pytest.approx(4.0, rel=0.05)
+        assert res["var_fft"]["Variance"][0] == pytest.approx(
+            np.var(y, ddof=0), rel=0.02
+        )
+
+    def test_hann_window_recovers_white(self):
+        rng = np.random.default_rng(7)
+        y = _synth_from_psd(lambda f: self.LVL, rng, offset=50.0)
+        data = np.column_stack((y, y))
+        res = calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS,
+            fft_window="hann",
+        )
+        assert res["var_fft"]["y_bar_d"][0] * 50.0 == pytest.approx(4.0, rel=0.02)
+        assert res["var_fft"]["Variance"][0] == pytest.approx(
+            np.var(y, ddof=0), rel=0.02
+        )
+
+    def test_ch2_disabled_zero_slots(self):
+        rng = np.random.default_rng(8)
+        y1 = _synth_from_psd(lambda f: self.LVL, rng, offset=50.0)
+        y2 = _synth_from_psd(lambda f: self.LVL, rng, offset=30.0)
+        data = np.column_stack((y1, y2))
+        res = calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS, ch2=False
+        )
+        assert res["var_fft"]["N"][0] == N_FFT
+        assert res["var_fft"]["N"][2] == 0
+        assert res["var_fft"]["Variance"][2] == 0
+        assert res["var_fft"]["y_bar_d"][2] == 0
+
+    def test_multiple_disjoint_bands(self):
+        rng = np.random.default_rng(9)
+        y = _synth_from_psd(lambda f: self.LVL, rng, offset=50.0)
+        data = np.column_stack((y, y))
+        res = calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS,
+            fft_bands=[(0.0, 100.0), (200.0, 300.0)],
+        )
+        assert res["var_fft"]["y_bar_d"][0] * 50.0 == pytest.approx(4.0, rel=0.05)
+
+
+class TestCalculateFftBlock:
+    """The standalone block used by the FFT analysis dialog."""
+
+    LVL = 0.008  # white var 4.0 at fs 1000
+
+    def _channel(self, line=None):
+        rng = np.random.default_rng(10)
+        return _synth_from_psd(
+            lambda f: self.LVL, rng, offset=50.0,
+            lines=[line] if line else (),
+        )
+
+    def test_matches_calculate_results_var_fft(self):
+        y = self._channel()
+        data = np.column_stack((y, y))
+        stats, _ = calculate_fft_block(y, FS, bands=[(0.0, 100.0)])
+        res = calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS,
+            fft_bands=[(0.0, 100.0)],
+        )
+        assert res["var_fft"]["N"][0] == stats["N"]
+        assert res["var_fft"]["Variance"][0] == pytest.approx(stats["Variance"])
+        assert res["var_fft"]["Covariance"][0] == pytest.approx(stats["Covariance"])
+        assert res["var_fft"]["y_bar_d"][0] == pytest.approx(stats["y_bar_d"])
+
+    def test_not_computable_returns_zero_stats_and_none_diagnostics(self):
+        stats, diag = calculate_fft_block(np.array([1.0, np.nan]), FS)
+        assert stats["N"] == 0 and diag is None
+        stats, diag = calculate_fft_block(self._channel(), FS, bands=[(600.0, 700.0)])
+        assert stats["N"] == 0 and diag is None
+
+    def test_diagnostics_floor_and_mask(self):
+        y = self._channel()
+        stats, diag = calculate_fft_block(y, FS, bands=[(0.0, 100.0)])
+        assert diag is not None
+        assert diag["f_nyquist"] == FS / 2
+        assert len(diag["freqs"]) == len(diag["psd"])
+        assert diag["floor_level"] == pytest.approx(self.LVL, rel=0.05)
+        kept = diag["kept_mask"]
+        assert kept[1 : int(100.0 * len(diag["freqs"]) / (FS / 2))].all()
+        assert not kept[int(150.0 * len(diag["freqs"]) / (FS / 2)) :].any()
+
+    def test_diagnostics_peaks_above_threshold(self):
+        y = self._channel(line=(250.0, 0.5))
+        stats, diag = calculate_fft_block(y, FS, threshold=8 * self.LVL)
+        assert diag["peaks"], "the 250 Hz line must be detected"
+        peak = max(diag["peaks"], key=lambda p: p["variance"])
+        assert peak["f_lo"] <= 250.0 <= peak["f_hi"]
+        assert peak["variance"] == pytest.approx(0.5, rel=0.3)
+
+    def test_no_threshold_no_peaks(self):
+        _, diag = calculate_fft_block(self._channel(), FS)
+        assert diag["peaks"] == []
+
+    def test_compute_spectrum_is_the_displayed_and_integrated_spectrum(self):
+        y = self._channel()
+        for method, nperseg in (("periodogram", 8192), ("welch", 8192)):
+            freqs, psd = compute_spectrum(
+                y, FS, method=method, window="rect", nperseg=nperseg
+            )
+            _, diag = calculate_fft_block(
+                y, FS, method=method, window="rect", nperseg=nperseg
+            )
+            assert np.allclose(freqs, diag["freqs"])
+            assert np.allclose(psd, diag["psd"])
+        _, psd_w = compute_spectrum(y, FS, method="welch", nperseg=8192)
+        # nearest segment count keeps the resolution within a few % of the
+        # requested fs/nperseg while truncating at most a handful of samples
+        requested = 8192 // 2 + 1
+        assert abs(len(psd_w) - requested) < requested * 0.05
+
+
+class TestWelchParseval:
+    """Welch must integrate to the same variance as the other estimators.
+
+    Regression: per-segment mean removal discarded the between-segment
+    variance (all power below fs/nperseg), so the Welch variance came out
+    systematically lower than the time-domain variance on drifting data.
+    """
+
+    LVL = 0.008  # white var 4.0
+
+    def _drifting_channel(self):
+        rng = np.random.default_rng(11)
+        y = _synth_from_psd(lambda f: self.LVL, rng, offset=50.0)
+        t = np.arange(len(y)) / FS
+        # 0.05 Hz drift: below the Welch resolution fs/8192 ~ 0.122 Hz
+        return y + 0.3 * np.sin(2 * np.pi * 0.05 * t)
+
+    def test_welch_variance_matches_time_domain(self):
+        y = self._drifting_channel()
+        data = np.column_stack((y, y))
+        res = calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS,
+            fft_method="welch", fft_nperseg=8192,
+        )
+        assert res["var_fft"]["Variance"][0] == pytest.approx(
+            np.var(y, ddof=0), rel=1e-4
+        )
+
+    def test_periodogram_and_welch_agree_on_variance(self):
+        y = self._drifting_channel()
+        data = np.column_stack((y, y))
+        common = dict(calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS)
+        per = calculate_results(data, **common)
+        wel = calculate_results(data, fft_method="welch", fft_nperseg=8192, **common)
+        assert per["var_fft"]["Variance"][0] == pytest.approx(
+            wel["var_fft"]["Variance"][0], rel=0.005
+        )
+
+    def test_line_area_conserved_between_estimators(self):
+        # a line keeps its integrated variance when the bins widen; with the
+        # global-mean Welch there is no per-segment absorption either.
+        # The floor MUST come from a line-free band: with the plain global
+        # mean the line's power is absorbed by L-hat and cov would be 0 by
+        # construction.
+        rng = np.random.default_rng(12)
+        y = _synth_from_psd(
+            lambda f: self.LVL, rng, offset=50.0, lines=[(250.0, 0.5)]
+        )
+        data = np.column_stack((y, y))
+        common = dict(
+            calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS,
+            fft_bands=[(0.0, 200.0)],
+        )
+        per = calculate_results(data, **common)
+        wel = calculate_results(data, fft_method="welch", fft_nperseg=8192, **common)
+        assert per["var_fft"]["Covariance"][0] == pytest.approx(0.5, rel=0.1)
+        assert wel["var_fft"]["Covariance"][0] == pytest.approx(
+            per["var_fft"]["Covariance"][0], rel=0.1
+        )
+
+
+class TestPerChannelThresholds:
+    """Channels with different white noise levels need separate thresholds.
+
+    A single line high enough for the noisier channel would sit inside the
+    other channel's fuzz (and vice versa), corrupting the clipped-mean floor.
+    """
+
+    def test_different_floors_recovered_with_own_thresholds(self):
+        rng = np.random.default_rng(13)
+        y1 = _synth_from_psd(lambda f: 0.008, rng, offset=50.0)   # white 4.0
+        y2 = _synth_from_psd(lambda f: 0.018, rng, offset=30.0)   # white 9.0
+        data = np.column_stack((y1, y2))
+        res = calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS,
+            fft_bands=[(0.0, 100.0)],
+            fft_threshold=8 * 0.008,
+            fft_threshold_ch2=8 * 0.018,
+        )
+        white1 = res["var_fft"]["y_bar_d"][0] * 50.0
+        white2 = res["var_fft"]["y_bar_d"][2] * 30.0
+        assert white1 == pytest.approx(4.0, rel=0.05)
+        assert white2 == pytest.approx(9.0, rel=0.05)
+
+    def test_wrong_single_threshold_biases_the_noisier_channel(self):
+        # the shared-line failure mode: applying CH1's (low) threshold to the
+        # noisier CH2 clips its fuzz and biases its white noise level down
+        rng = np.random.default_rng(14)
+        y1 = _synth_from_psd(lambda f: 0.008, rng, offset=50.0)
+        y2 = _synth_from_psd(lambda f: 0.018, rng, offset=30.0)
+        data = np.column_stack((y1, y2))
+        res = calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS,
+            fft_bands=[(0.0, 100.0)],
+            fft_threshold=8 * 0.008,
+            fft_threshold_ch2=8 * 0.008,   # CH1's line on CH2: too low
+        )
+        white2 = res["var_fft"]["y_bar_d"][2] * 30.0
+        # expected clipped floor: L*(1-exp(-T/L)) with L=0.018, T=8*0.008
+        expected_biased = 0.018 * (1 - np.exp(-8 * 0.008 / 0.018)) * (FS / 2)
+        assert white2 == pytest.approx(expected_biased, rel=0.05)
+        assert white2 < 8.8 < 9.0
+
+
+def test_spectral_peaks_gap_merge():
+    """Runs separated by one empty bin merge; two empty bins split."""
+    freqs = np.arange(0, 10, dtype=float)          # df = 1
+    psd = np.zeros(10)
+    psd[[2, 4, 7]] = [5.0, 5.0, 5.0]               # 2|3|4 one peak, 7 another
+    peaks = find_spectral_peaks(psd, freqs, threshold=1.0)
+    assert len(peaks) == 2
+    assert peaks[0]["f_lo"] == pytest.approx(1.5)   # bin edges
+    assert peaks[0]["f_hi"] == pytest.approx(4.5)
+    assert peaks[0]["f_center"] == pytest.approx(3.0)
+    assert peaks[1]["f_center"] == pytest.approx(7.0)
+    assert peaks[0]["variance"] == pytest.approx((5 - 1) * 2 * 1.0)  # only the 2 above-threshold bins
+    assert peaks[1]["f_lo"] == pytest.approx(6.5)
+    assert peaks[1]["variance"] == pytest.approx(4.0)

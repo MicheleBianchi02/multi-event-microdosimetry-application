@@ -527,10 +527,13 @@ reported as warnings. Pre-3.0 archives instead carry the old
 | `rois_time_s` | Time filters: list of `[t_start, t_stop]` pairs in seconds. Re-applied to the raw data when the archive is loaded. |
 | `rois_channel` | Amplitude filters: list of `[channel, min, max]` triples (`channel`: 0 = CH1, 1 = CH2; bounds in ADC counts). Re-applied on load. |
 | `results` | The variance–covariance estimators (below). |
+| `fft` | Present only when the FFT analysis was run and applied. The parameters as chosen in the dialog — `method` (`periodogram`/`welch`), `window` (`rect`/`hann`), `nperseg`, `excluded_bands` (list of `[f_min, f_max]` Hz pairs the user marked as excluded; the white floor is measured on the complement), `threshold_ch1`/`threshold_ch2` (per-channel clip levels in counts²/Hz; `null` = not used) — plus a `diagnostics` snapshot per channel: `floor_level` (counts²/Hz) and the **selected** peaks (`peaks`: `f_lo`, `f_center`, `f_hi` in Hz, `variance` in counts² — the ones the user identified as real in the dialog's peak panel, listed in ascending frequency) together with `peaks_detected`, the total number found before selection. The selection is documentation: the `Covariance` of `var_fft` is the global non-white excess and does not depend on it. The PSD itself is not stored: it is recomputable from `data.csv` with exactly these parameters. |
 
 `results` contains one entry per estimator — `var` (variance method),
-`var_cov` (successive covariance), `var_autocov` (lag-1 autocovariance) and
-`var_doublecov` (cross-channel covariance, two detectors only). Each
+`var_cov` (successive covariance), `var_autocov` (lag-1 autocovariance),
+`var_doublecov` (cross-channel covariance, two detectors only) and
+`var_fft` (frequency-domain method, present once computed; see `fft` above).
+Each
 parameter is a 4-element list with the layout
 **[CH1 value, CH1 uncertainty, CH2 value, CH2 uncertainty]**:
 

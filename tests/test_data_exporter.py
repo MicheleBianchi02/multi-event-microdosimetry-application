@@ -95,3 +95,89 @@ def test_acquisition_mode_debug(session, tmp_path):
     session.debug_mode = True
     settings = DataExporter.build_settings_dict(session, hardware_manager=None)
     assert settings["measurement_info"]["acquisition_mode"] == "debug"
+
+
+FFT_PARAMS = {
+    "excluded_bands": [[100.0, 500.0]],
+    "threshold_ch1": 0.0464,
+    "threshold_ch2": 0.1049,
+    "method": "welch",
+    "window": "hann",
+    "nperseg": 8192,
+    "diagnostics": {
+        "ch1": {
+            "floor_level": 0.008001,
+            "threshold": 0.0464,
+            # only the peaks the user selected are archived
+            "peaks": [{"f_lo": 100.24, "f_center": 100.3, "f_hi": 100.36,
+                       "variance": 0.079}],
+            "peaks_detected": 47,
+        },
+        "ch2": {"floor_level": 0.018002, "threshold": 0.1049, "peaks": [],
+                "peaks_detected": 0},
+    },
+}
+
+
+def test_fft_block_absent_without_analysis(session):
+    """No FFT analysis run -> the archive has no fft key at all."""
+    settings = DataExporter.build_settings_dict(
+        session,
+        analysis_meta={
+            "analysis_timestamp": "2026-09-11T10:00:00+02:00",
+            "n_bootstraps": 1,
+        },
+    )
+    assert "fft" not in settings["analysis"]
+
+
+def test_fft_block_persisted(session, tmp_path):
+    """Applied FFT analysis: params + diagnostics land in analysis.fft."""
+    results = {
+        "var_fft": {
+            "N": [1000, 0, 1000, 0],
+            "Mean": [50.0, 0, 30.0, 0],
+            "Variance": [4.1, 0, 9.2, 0],
+            "Covariance": [0.1, 0, 0.2, 0],
+            "y_bar_d": [0.08, 0, 0.3, 0],
+        }
+    }
+    csv_path = tmp_path / "run.csv"
+    csv_path.write_text("timestamp,ch1,ch2\n0.0,100,100\n")
+    zip_path = tmp_path / "measurement.zip"
+    ok = DataExporter.export_to_zip(
+        session_model=session,
+        temp_csv_path=str(csv_path),
+        zip_filepath=str(zip_path),
+        results_dict=results,
+        analysis_meta={
+            "analysis_timestamp": "2026-09-11T10:00:00+02:00",
+            "n_bootstraps": 1,
+            "fft": dict(FFT_PARAMS),
+        },
+    )
+    assert ok
+
+    loaded = load_file(str(zip_path))
+    analysis = loaded["settings"]["analysis"]
+    assert analysis["fft"] == FFT_PARAMS
+    # results travel in the same block (the fifth estimator)
+    assert analysis["results"]["var_fft"]["Variance"][0] == 4.1
+    # JSON-safety: no tuples leaked through
+    json.dumps(analysis)
+
+
+def test_update_analysis_swaps_fft_block(session, tmp_path):
+    """Re-analysis replaces the fft block; a cleared analysis removes it."""
+    csv_path = tmp_path / "run.csv"
+    csv_path.write_text("timestamp,ch1,ch2\n0.0,100,100\n")
+    zip_path = tmp_path / "measurement.zip"
+    assert DataExporter.export_to_zip(
+        session, str(csv_path), str(zip_path),
+        analysis_meta={"analysis_timestamp": "t1", "n_bootstraps": 1,
+                       "fft": dict(FFT_PARAMS)},
+    )
+    meta = {"analysis_timestamp": "t2", "n_bootstraps": 1}
+    assert DataExporter.update_analysis_in_zip(str(zip_path), {}, meta)
+    analysis = load_file(str(zip_path))["settings"]["analysis"]
+    assert "fft" not in analysis

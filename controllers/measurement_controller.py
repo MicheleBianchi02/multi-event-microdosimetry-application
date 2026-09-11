@@ -146,7 +146,10 @@ class MeasurementController(QObject):
                 "analysis_timestamp": datetime.datetime.now().astimezone().isoformat(),
                 "n_bootstraps": n_boots,
                 "rois_time_s": getattr(self.session, "time_rois", []),
-                "rois_channel": getattr(self.session, "rois", [])
+                "rois_channel": getattr(self.session, "rois", []),
+                # FFT analysis provenance (params + diagnostics); absent when
+                # the user never ran the FFT analysis
+                "fft": getattr(self.data_model, "fft_analysis_params", None) or None,
             }
 
             hardware_manager = self.hardware.hardware_manager
@@ -353,6 +356,11 @@ class MeasurementController(QObject):
                     except Exception as e:
                         import logging
                         logging.getLogger(__name__).error(f"Failed to parse results from JSON: {e}")
+                # Restore the FFT analysis setup (params + diagnostics) so
+                # reopening the dialog reproduces the archived analysis
+                fft_params = analysis.get("fft")
+                if isinstance(fft_params, dict):
+                    self.data_model.fft_analysis_params = fft_params
     
             self.running_view.update_after_load(elapsed_time)
             self.main_window.change_to_running_window()
@@ -788,6 +796,8 @@ class MeasurementController(QObject):
             self.data_model.result["var_cov"] = new_result["var_cov"]
             self.data_model.result["var_doublecov"] = new_result["var_doublecov"]
             self.data_model.result["var_autocov"] = new_result["var_autocov"]
+            # var_fft is NOT copied: it is only written by the user through
+            # the FFT analysis dialog and must survive the rolling refresh
 
         ma_dict = {0: {}, 1: {}}
         fft_dict = {0: {}, 1: {}}

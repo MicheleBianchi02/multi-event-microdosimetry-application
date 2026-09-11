@@ -6,12 +6,275 @@ from arch.bootstrap import optimal_block_length
 from numpy.typing import NDArray
 
 
+def one_sided_psd(
+    y: NDArray, fs: float, window: str = "rect", remove_mean: bool = True
+) -> NDArray:
+    """
+    One-sided power spectral density in input-units²/Hz.
+
+    Same normalization as AnalysisService.calculate_fft(mode="psd"), so PSD
+    values in dB match the FFT plot the user draws the threshold line on.
+    A Hann window is normalized by Σw² (equal-noise-bandwidth) so that the
+    white floor level stays calibrated. By default the mean of `y` is
+    removed; Welch passes remove_mean=False because the global mean is
+    already subtracted before splitting (see compute_spectrum).
+    """
+    n = len(y)
+    if remove_mean:
+        y = y - y.mean()
+    if window == "hann":
+        w = np.hanning(n)
+        fft_values = np.fft.rfft(y * w)
+        denom = fs * np.sum(w**2)
+    elif window == "rect":
+        fft_values = np.fft.rfft(y)
+        denom = fs * n
+    else:
+        raise ValueError(f"Unknown fft_window '{window}'. Choose 'rect' or 'hann'.")
+
+    psd = (np.abs(fft_values) ** 2) / denom
+    # single-sided scaling: fold negative-frequency power into AC bins
+    if n % 2 == 0:
+        psd[1:-1] *= 2.0
+    else:
+        psd[1:] *= 2.0
+    return psd
+
+
+def compute_spectrum(
+    channel: NDArray,
+    sample_freq_hz: float,
+    method: str = "periodogram",
+    window: str = "rect",
+    nperseg: int = 8192,
+) -> tuple[NDArray | None, NDArray | None]:
+    """
+    One-sided PSD (input-units²/Hz) exactly as the var_fft estimator
+    integrates it — the FFT analysis dialog plots this, so what the user
+    sees is what the calculation uses.
+
+    The global mean is subtracted ONCE, before any segmentation: Welch
+    therefore does NOT remove each segment's own mean, and the segment-to-
+    segment mean differences (slow drift below the Welch resolution) are
+    preserved in the DC bin instead of being discarded. This keeps the PSD
+    integral equal to the time-domain variance of the whole record (Parseval,
+    exact for the rectangular window): the DC bin carries exactly the
+    between-segment variance.
+
+    Parameters
+    ----------
+    channel : NDArray
+        Time series of one channel (may contain NaNs; they are dropped).
+    sample_freq_hz : float
+        Sampling frequency in Hz.
+    method : {"periodogram", "welch"}
+        Full-length periodogram or segment-averaged Welch. The Welch segment
+        count is chosen as round(n/nperseg) with the segment length derived
+        from it, so at most a handful of samples are truncated and the
+        resolution stays close to the requested fs/nperseg.
+    window : {"rect", "hann"}
+        Taper applied before every FFT.
+    nperseg : int
+        Requested segment length of the Welch estimator (ignored otherwise).
+
+    Returns
+    -------
+    (freqs, psd) : tuple
+        Bin-center frequencies in Hz and the PSD. Both are None when the
+        spectrum cannot be computed (fewer than 2 valid samples).
+    """
+    channel = channel[~np.isnan(channel)]
+    if sample_freq_hz is None or sample_freq_hz <= 0 or len(channel) < 2:
+        return None, None
+    channel = channel - channel.mean()
+
+    if method == "welch":
+        n_segments = max(1, int(round(len(channel) / nperseg)))
+        seg_len = len(channel) // n_segments
+        segments = channel[: n_segments * seg_len].reshape(n_segments, seg_len)
+        psd = np.mean(
+            [
+                one_sided_psd(seg, sample_freq_hz, window, remove_mean=False)
+                for seg in segments
+            ],
+            axis=0,
+        )
+        freqs = np.fft.rfftfreq(seg_len, d=1.0 / sample_freq_hz)
+    elif method == "periodogram":
+        psd = one_sided_psd(channel, sample_freq_hz, window, remove_mean=False)
+        freqs = np.fft.rfftfreq(len(channel), d=1.0 / sample_freq_hz)
+    else:
+        raise ValueError(
+            f"Unknown fft_method '{method}'. Choose 'periodogram' or 'welch'."
+        )
+    return freqs, psd
+
+
+def find_spectral_peaks(psd: NDArray, freqs: NDArray, threshold: float) -> list:
+    """
+    Group bins with PSD > threshold into peak ranges.
+
+    Runs separated by at most ONE below-threshold bin are merged into a
+    single peak: an isolated noise-tail crossing would otherwise split real
+    lines and inflate the peak list when the threshold sits low. The DC bin
+    (the mean²) is never reported as a peak.
+
+    Returns a list of dicts with the frequency range in Hz (bin edges, so a
+    line between two bins is contained in it), its center, and the
+    integrated excess power above the threshold (input-units²):
+    {"f_lo", "f_center", "f_hi", "variance"}.
+    """
+    mask = psd > threshold
+    mask[0] = False
+    idx = np.flatnonzero(mask)
+    if idx.size == 0:
+        return []
+    df = freqs[1] - freqs[0]
+    splits = np.flatnonzero(np.diff(idx) > 2)
+    peaks = []
+    for run in np.split(idx, splits + 1):
+        f_lo = float(freqs[run[0]] - df / 2.0)
+        f_hi = float(freqs[run[-1]] + df / 2.0)
+        peaks.append(
+            {
+                "f_lo": f_lo,
+                "f_center": (f_lo + f_hi) / 2.0,
+                "f_hi": f_hi,
+                "variance": float(np.sum(psd[run] - threshold) * df),
+            }
+        )
+    return peaks
+
+
+def calculate_fft_block(
+    channel: NDArray,
+    sample_freq_hz: float,
+    bands: list | None = None,
+    threshold: float | None = None,
+    method: str = "periodogram",
+    window: str = "rect",
+    nperseg: int = 8192,
+) -> tuple[dict, dict | None]:
+    """
+    Frequency-domain variance–covariance estimator ("var_fft"), one channel.
+
+    - floor level L: mean of the PSD over the kept bands (optionally clipped
+      at `threshold` for robustness against peaks left inside a band);
+    - Variance: integral of the PSD over all frequencies including bin 0
+      (time-domain variance of the whole record by Parseval — exact for the
+      rectangular window, for Welch as well since bin 0 carries the
+      between-segment power);
+    - Covariance: var − L·f_Nyquist (total non-white variance);
+    - y_bar_d = L·f_Nyquist / mean.
+
+    NaN samples are dropped, never interpolated. Frequencies outside the kept
+    bands are excluded ONLY from the floor estimate.
+
+    Parameters
+    ----------
+    channel : NDArray
+        The time series of one channel (may contain NaNs).
+    sample_freq_hz : float
+        Sampling frequency in Hz.
+    bands : list of (f_min, f_max), optional
+        Kept frequency bands in Hz; None/empty = full band.
+    threshold : float, optional
+        PSD level (input-units²/Hz) at which band values are clipped before
+        averaging; None = plain mean.
+    method : {"periodogram", "welch"}
+        Spectrum estimator ("welch" averages `nperseg`-long segments).
+    window : {"rect", "hann"}
+        Taper applied before the FFT.
+    nperseg : int
+        Segment length of the Welch estimator.
+
+    Returns
+    -------
+    (stats, diagnostics) : tuple
+        `stats` holds the scalars {N, Mean, Variance, Covariance, y_bar_d}
+        (all 0 when the block is not computable: too few samples, no kept
+        frequency bin, or invalid sample frequency). `diagnostics` is None in
+        that case, otherwise a dict with `freqs`, `psd` (linear), `df`,
+        `f_nyquist`, `floor_level`, `threshold`, `bands` (as used), `kept_mask`
+        and `peaks` (the contiguous above-threshold ranges, empty when no
+        threshold is set).
+    """
+    stats = {"N": 0, "Mean": 0.0, "Variance": 0.0, "Covariance": 0.0, "y_bar_d": 0.0}
+    if sample_freq_hz is None or sample_freq_hz <= 0:
+        return stats, None
+
+    channel = channel[~np.isnan(channel)]
+    n_ch = len(channel)
+    if n_ch < 2:
+        return stats, None
+    mean_ch = float(np.mean(channel))
+
+    freqs, psd = compute_spectrum(
+        channel, sample_freq_hz, method=method, window=window, nperseg=nperseg
+    )
+    if freqs is None:
+        return stats, None
+
+    df = freqs[1]
+    ac = freqs > 0
+    # integral over ALL bins: bin 0 is ~0 for the periodogram (the global
+    # mean is removed) and holds the between-segment variance for Welch, so
+    # the variance matches the time-domain value for both estimators
+    var_psd = float(psd.sum() * df)
+
+    band = ac.copy()
+    if bands:
+        band = np.zeros_like(ac)
+        for f_lo, f_hi in bands:
+            band |= (freqs >= f_lo) & (freqs <= f_hi)
+        band &= ac
+    if not band.any():
+        return stats, None
+
+    band_vals = psd[band]
+    if threshold is not None:
+        band_vals = np.minimum(band_vals, threshold)
+    floor_level = float(band_vals.mean())
+
+    white = floor_level * (sample_freq_hz / 2.0)
+    cov = var_psd - white
+    yd = white / mean_ch if mean_ch > 0 else 0.0
+
+    stats.update(
+        N=n_ch, Mean=mean_ch, Variance=var_psd, Covariance=cov, y_bar_d=yd
+    )
+    diagnostics = {
+        "freqs": freqs,
+        "psd": psd,
+        "df": df,
+        "f_nyquist": sample_freq_hz / 2.0,
+        "floor_level": floor_level,
+        "threshold": threshold,
+        "bands": [list(b) for b in bands] if bands else [],
+        "kept_mask": band,
+        "peaks": (
+            find_spectral_peaks(psd, freqs, threshold)
+            if threshold is not None
+            else []
+        ),
+    }
+    return stats, diagnostics
+
+
 def calculate_results(
     data: NDArray,
     ch1: bool = True,
     ch2: bool = True,
     cov_both_ch: bool = False,
     calc_bootstrap: bool = True,
+    calc_fft: bool = False,
+    sample_freq_hz: float | None = None,
+    fft_bands: list | None = None,
+    fft_threshold: float | None = None,
+    fft_threshold_ch2: float | None = None,
+    fft_method: str = "periodogram",
+    fft_window: str = "rect",
+    fft_nperseg: int = 8192,
 ) -> dict:
     """
     Compute mean, variance, covariance, autocovariance and their uncertainties.
@@ -34,6 +297,46 @@ def calculate_results(
     cov_both_ch : bool, default=False
         If True, compute covariance between the two channels (requires both ch1 and ch2 True).
         Uses full columns (even+odd pairing) instead of interleaved decimation.
+        If either channel is disabled, the flag is silently ignored and the
+        "var_doublecov" section is returned zeroed (N = 0 marks "not computed").
+    calc_fft : bool, default=False
+        If True, compute the frequency‑domain estimator ("var_fft"). The white
+        noise floor level L is estimated as the mean of the one‑sided PSD over
+        the kept frequency bands (fft_bands); the variance is the integral of
+        the PSD over ALL frequencies — equal to the time‑domain variance
+        (Parseval; exact for the rectangular window, for Welch too because the
+        DC bin carries the between-segment power); the covariance is
+        var − L·f_Nyquist, i.e. everything above the white floor (peaks,
+        coloured excess and slow drift alike); and y_bar_d = L·f_Nyquist /
+        mean. Uncertainties are not implemented for this method (0). Requires
+        sample_freq_hz; if it is missing the section is returned zeroed.
+    sample_freq_hz : float, optional
+        Sampling frequency in Hz (only used by the FFT method).
+    fft_bands : list of (f_min, f_max), optional
+        Kept frequency bands in Hz, used ONLY to estimate the white floor. The
+        variance and covariance always integrate the whole spectrum, so the
+        reported variance still matches the time‑domain variance when bands
+        are excluded. None or empty = full band. Excluding a region only
+        changes where the floor level is measured (e.g. drop 0–100 Hz when a
+        pulsed beam fills it with lines).
+    fft_threshold : float, optional
+        CH1: PSD level (input‑units²/Hz) at which the band values are clipped
+        before averaging — robustness against peaks left inside a band.
+        None = plain mean. The threshold line drawn on the FFT plot (dB) maps
+        here as 10**(dB/10); it should sit above that channel's noise fuzz.
+    fft_threshold_ch2 : float, optional
+        Same as fft_threshold for channel 2. The two channels can have very
+        different white noise levels, so each has its own threshold line.
+    fft_method : {"periodogram", "welch"}, default="periodogram"
+        Spectrum estimator: a single full‑length periodogram (maximum frequency
+        resolution) or segment‑averaged Welch (stabler floor, coarser
+        resolution).
+    fft_window : {"rect", "hann"}, default="rect"
+        Taper applied before the FFT. "rect" matches the FFT plot shown in the
+        UI; "hann" reduces leakage from strong lines at the cost of wider
+        peaks.
+    fft_nperseg : int, default=8192
+        Segment length of the Welch estimator (ignored for the periodogram).
     n_bootstraps : int, default=5000
         Number of bootstrap resamples for uncertainty estimation.
 
@@ -53,6 +356,9 @@ def calculate_results(
         For "var_cov", the "Covariance" list stores [cov_12, unc_cov, cov_12, unc_cov].
         For "var_autocov", the "AutoCorrelation" list stores [γ(1), unc_γ, γ(1), unc_γ],
         where γ(1) is the lag‑1 autocovariance of the channel.
+        "var_fft" (computed only when calc_fft=True) has the same layout as "var_cov";
+        its "Covariance" is the total non‑white variance above the white floor and its
+        uncertainty slots are always 0 (not implemented yet).
 
     Notes
     -----
@@ -233,6 +539,29 @@ def calculate_results(
         result[target_key]["y_bar_d"][ii + 1] = unc_yd
         result[target_key]["cov_mean_sq"][ii + 1] = unc_cov_mean_sq
 
+    def calc_fft_estimator(idx: int, ii: int):
+        """
+        Fill the "var_fft" row (slots ii/ii+1) for one channel via
+        calculate_fft_block. Leaves the section zeroed (N = 0, "not computed")
+        when the block is not computable.
+        """
+        stats, _ = calculate_fft_block(
+            data[:, idx],
+            sample_freq_hz,
+            bands=fft_bands,
+            threshold=fft_threshold if idx == 0 else fft_threshold_ch2,
+            method=fft_method,
+            window=fft_window,
+            nperseg=fft_nperseg,
+        )
+        if stats["N"] == 0:
+            return
+        result["var_fft"]["N"][ii] = stats["N"]
+        result["var_fft"]["Mean"][ii] = stats["Mean"]
+        result["var_fft"]["Variance"][ii] = stats["Variance"]
+        result["var_fft"]["Covariance"][ii] = stats["Covariance"]
+        result["var_fft"]["y_bar_d"][ii] = stats["y_bar_d"]
+
     def batch_lagged_auto_cov(batch_matrix, t, ddof=1):
         """
         Compute lagged autocovariance for each row in a batch.
@@ -366,10 +695,17 @@ def calculate_results(
             "y_bar_d": [0, 0, 0, 0],
             "cov_mean_sq": [0, 0, 0, 0],
         },
+        "var_fft": {
+            "N": [0, 0, 0, 0],
+            "Mean": [0, 0, 0, 0],
+            "Variance": [0, 0, 0, 0],
+            "Covariance": [0, 0, 0, 0],
+            "y_bar_d": [0, 0, 0, 0],
+        },
     }
 
     batch_size = 2
-    all_method_keys = ["var", "var_cov", "var_doublecov", "var_autocov"]
+    all_method_keys = ["var", "var_cov", "var_doublecov", "var_autocov", "var_fft"]
 
     for idx, ii in [(0, 0), (1, 2)]:
         # If the channel is not meant to be processed, zero it and skip
@@ -411,7 +747,7 @@ def calculate_results(
 
         # Check for empty or zero-sum arrays to skip bootstrap
         if n <= 1 or np.ptp(data_matrix) == 0:
-            zero_results(result, ii, ["var_cov", "var_doublecov", "var_autocov"])
+            zero_results(result, ii, ["var_cov", "var_doublecov", "var_autocov", "var_fft"])
             continue
 
         # ==================================
@@ -526,5 +862,11 @@ def calculate_results(
         result["var_autocov"]["AutoCorrelation"][ii + 1] = unc_auto_cov
         result["var_autocov"]["y_bar_d"][ii + 1] = unc_yd
         result["var_autocov"]["autocov_mean_sq"][ii + 1] = unc_autocov_mean_sq
+
+        # ==============================
+        # --- FFT VARIANCE-COVARIANCE ---
+        # ==============================
+        if calc_fft and sample_freq_hz:
+            calc_fft_estimator(idx, ii)
 
     return result

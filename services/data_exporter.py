@@ -105,7 +105,12 @@ class DataExporter:
                 "results": results_dict
             }
         }
-        
+        # FFT analysis provenance: present only when the user ran and applied
+        # the FFT analysis; the PSD itself is recomputable from data.csv.
+        fft_params = analysis_meta.get("fft")
+        if fft_params:
+            settings["analysis"]["fft"] = fft_params
+
         return settings
 
     @staticmethod
@@ -171,6 +176,11 @@ class DataExporter:
                 settings_dict["analysis"]["rois_time_s"] = analysis_meta.get("rois_time_s", [])
                 settings_dict["analysis"]["rois_channel"] = analysis_meta.get("rois_channel", [])
                 settings_dict["analysis"]["results"] = results_dict
+                fft_params = analysis_meta.get("fft")
+                if fft_params:
+                    settings_dict["analysis"]["fft"] = fft_params
+                else:
+                    settings_dict["analysis"].pop("fft", None)
                 
                 settings_json = json.dumps(settings_dict, indent=4)
                 

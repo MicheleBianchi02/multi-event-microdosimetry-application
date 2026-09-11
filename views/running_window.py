@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.constants import NUM_BINS
+from views.fft_analysis_dialog import FFTAnalysisDialog
 from views.info_dialog import InfoDialog
 
 logger = logging.getLogger(__name__)
@@ -706,6 +707,11 @@ class RunningWindow(QWidget):
         update_bnt.clicked.connect(self.update_results)
         bnt_row.addWidget(update_bnt)
 
+        self.fft_analysis_bnt = QPushButton("FFT Analysis…")
+        self.fft_analysis_bnt.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fft_analysis_bnt.clicked.connect(self.on_fft_analysis)
+        bnt_row.addWidget(self.fft_analysis_bnt)
+
         bnt_row.addStretch()
 
         self.var_cov_bootstrap_lbl = QLabel("Number of Bootstraps:")
@@ -847,6 +853,9 @@ class RunningWindow(QWidget):
 
             elif macro_name == "var_autocov":
                 display_title = "Variance AutoCorrelation Method"
+
+            elif macro_name == "var_fft":
+                display_title = "FFT Method"
 
             box.setTitle(f"{display_title}")
 
@@ -1038,6 +1047,51 @@ class RunningWindow(QWidget):
 
     def update_results(self, plot_only=False):
         self.calculate_results(plot_only)
+
+    def on_fft_analysis(self):
+        """Open the FFT analysis dialog on the currently displayed data."""
+        if self.data_model is None or self.data_model.ptr < 2:
+            QMessageBox.information(
+                self,
+                "FFT Analysis",
+                "No data available for the FFT analysis.",
+            )
+            return
+
+        sample_freq = self.session.sample_freq
+        if not sample_freq or sample_freq <= 0:
+            QMessageBox.information(
+                self,
+                "FFT Analysis",
+                "The sample frequency is not set: run a measurement first.",
+            )
+            return
+
+        data = self.data_model.filtered_data[: self.data_model.ptr, :].copy()
+        dialog = FFTAnalysisDialog(
+            data,
+            sample_freq_hz=sample_freq,
+            n_channels=2 if self.session.multiple_channel else 1,
+            params=self.data_model.fft_analysis_params,
+            parent=self,
+        )
+        dialog.reset_requested.connect(self.on_fft_analysis_reset)
+
+        if dialog.exec():
+            if dialog.result_block is not None:
+                self.data_model.result["var_fft"] = dialog.result_block
+            if dialog.applied_params is not None:
+                self.data_model.fft_analysis_params = dialog.applied_params
+            self.refresh_result_ui()
+
+    def on_fft_analysis_reset(self):
+        """Zero the FFT block (requested from inside the dialog)."""
+        self.data_model.fft_analysis_params = {}
+        self.data_model.result["var_fft"] = {
+            key: [0, 0, 0, 0]
+            for key in ("N", "Mean", "Variance", "Covariance", "y_bar_d")
+        }
+        self.refresh_result_ui()
 
         if not plot_only:
             self.refresh_result_ui()

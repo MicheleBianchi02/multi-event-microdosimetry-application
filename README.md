@@ -200,6 +200,23 @@ Four estimators are computed over the (ROI-filtered) data, each with uncertainti
   ȳ_D = (var − cov)/mean.
 - `var_autocov` — lag-1 autocovariance method: ȳ_D = (var − γ₁)/mean.
 - `var_doublecov` — cross-channel covariance method (two detectors only).
+- `var_fft` — frequency-domain method, computed **only on explicit user
+  request** from the *FFT Analysis…* dialog in the results panel (values stay
+  zero otherwise): the white-noise floor of the one-sided PSD is measured as
+  the mean over the frequency bins kept by the user — the shaded regions the
+  user draws mark the **excluded** bands, and the floor is measured on their
+  complement (optionally clipped at a movable threshold line) —, the variance
+  is the PSD integral over the *whole* spectrum (Parseval-exact, Welch
+  included), the covariance is everything above the white floor (peaks,
+  coloured excess and slow drift), and ȳ_D = floor·f_Nyquist/mean.
+  Periodogram or Welch, rectangular or Hann window — the plot always shows
+  exactly the spectrum the calculation integrates. Peaks above the threshold
+  are listed per channel in ascending frequency; every peak starts
+  **unchecked**, and only the ones the user identifies as real are archived.
+  Uncertainties are not implemented yet (0). The results are stored in
+  `analysis.results` of the archive and the
+  dialog parameters (excluded bands, thresholds, method, window, nperseg)
+  plus a floor/peaks diagnostic snapshot in `analysis.fft`.
 
 ## 3. User workflow
 
@@ -296,8 +313,10 @@ Each measurement is a self-contained ZIP with four members:
   snapshot of the hardware: ADC bits and applied input range, per-channel applied
   `gpio_mask` and total `capacitance_pF`, the resolved hardware summary and the
   config sha256 — `timing_settings` (integration/reset/period/
-  sample frequency), `analysis` (ROIs, bootstrap metadata, results of all four
-  estimators). The hardware section is read-only for the offline analysis; a
+  sample frequency), `analysis` (ROIs, bootstrap metadata, results of all five
+  estimators, and — when the user ran the FFT analysis — the `fft` block with
+  its parameters and a floor/peaks diagnostic snapshot). The hardware section
+  is read-only for the offline analysis; a
   consistency check on load verifies mask ↔ capacitance against the config.
 - **`hardware_config.json`** — verbatim copy of the config used for this run, so
   the archive interprets itself without any external file.
@@ -359,7 +378,12 @@ severities in [BUG.md](BUG.md)):
 - **Concrete driver documentation**: the Pico/PIC implementations will be modified;
   their serial protocols will be documented when the firmware sources are final
   (`microcontroller_api.md` / `daq_architecture.txt` are outdated).
-- **FFT analysis**: Add FFT analysis custom window for the result panel.
+- **FFT analysis uncertainties**: the `var_fft` estimator currently reports 0
+  for its uncertainties; a bootstrap or propagation scheme is future work.
+- **Multi file analysis**: Analyze multiple measurement at the same time. 
+  Create multiple custom plot. The user can decide the X and Y axis with custom created 
+  formulae. Create a "calculator" where the user can insert the equations of various 
+  allowed parameters. 
 
 ## 7. Running and building
 
