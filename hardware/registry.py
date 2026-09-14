@@ -36,10 +36,9 @@ def _serial_factory(cls) -> Callable[[dict, DeviceConfig], Any]:
                 f"driver {cls.__name__} requires a 'serial' connection, "
                 f"got {connection.get('type')!r}"
             )
-        return cls(
-            port=connection.get("port"),
-            baud_rate=connection.get("baud_rate", 115200),
-        )
+        # No port here: the persistent name is derived from the device id by
+        # the HardwareManager (the config carries no port).
+        return cls(baud_rate=connection.get("baud_rate", 115200))
 
     return create
 

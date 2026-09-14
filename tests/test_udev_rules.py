@@ -21,17 +21,18 @@ def test_configured_serial_devices():
     import json
 
     devices = genudev.configured_serial_devices(json.load(open(EXAMPLE)))
-    assert devices == [("pico_1", "pico_daq")]
+    # symlink names are derived from the device ids (the config has no port)
+    assert devices == [("pico_1", "atomiqa/pico_1")]
 
 
 def test_rule_contains_serial_match():
-    rule = genudev.build_rule("pico_timing", {"vendor": "2e8a", "product": "0009", "serial": "E661"})
-    assert rule == 'SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0009", ATTRS{serial}=="E661", SYMLINK+="pico_timing"'
+    rule = genudev.build_rule("atomiqa/pico_1", {"vendor": "2e8a", "product": "0009", "serial": "E661"})
+    assert rule == 'SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0009", ATTRS{serial}=="E661", SYMLINK+="atomiqa/pico_1"'
 
 
 def test_rule_without_serial_falls_back_to_vid_pid():
-    rule = genudev.build_rule("x", {"vendor": "2e8a", "product": None, "serial": None})
-    assert rule == 'SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", SYMLINK+="x"'
+    rule = genudev.build_rule("atomiqa/x", {"vendor": "2e8a", "product": None, "serial": None})
+    assert rule == 'SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", SYMLINK+="atomiqa/x"'
 
 
 def test_usb_enumeration_over_fake_sysfs(tmp_path, monkeypatch):

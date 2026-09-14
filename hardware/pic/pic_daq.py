@@ -90,18 +90,14 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
             self.serial.close()
         return True
 
-    def verify_connection(self) -> bool:
-        if not self.connect():
-            return False
-        response = bytes()
-        operation_timeout = time.time() + self.timeout
-        with self._lock:
-            self.serial.reset_input_buffer()
-            self.serial.write(b"V")
-        while not response and time.time() < operation_timeout:
-            with self._lock:
-                response = self.serial.read(1)
-        return self._check_response("V", response, "Connection verification")
+    def set_connection_params(self, port: str, baud_rate: int) -> None:
+        """Update the connection parameters used by the next connect()."""
+        self._port = port
+        self._baud_rate = baud_rate
+
+    @property
+    def is_connected(self) -> bool:
+        return self.serial.is_open
 
     def set_event_mode(self, is_single_event: bool) -> bool:
         if not self.connect():

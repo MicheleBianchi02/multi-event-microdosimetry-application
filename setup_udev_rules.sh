@@ -1,6 +1,8 @@
 #!/bin/bash
 # Generate and install the udev rules for one hardware configuration:
-# one rule per configured serial device, matched by USB serial number.
+# one rule per configured serial device, matched by USB serial number,
+# each creating the symlink /dev/atomiqa/<device_id> (the persistent name
+# the app derives from the config — the config itself carries no port).
 #
 #   sudo ./setup_udev_rules.sh <workspace>/hardware_config.json
 #

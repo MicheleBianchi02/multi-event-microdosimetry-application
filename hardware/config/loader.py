@@ -528,6 +528,19 @@ def _validate_semantics(config: HardwareConfig, errors: list, warnings: list) ->
                 f"roles.{role_name}: device {dev_id!r} has no '{capability}' capability block"
             )
 
+    # --- deprecated 'port' field in serial connections ---
+    # The config deliberately carries no port: the persistent name is derived
+    # from the device id (/dev/atomiqa/<id>) and created by an udev rule, so
+    # the file stays machine-independent.
+    for dev_id, device in devices.items():
+        connection = device.connection or {}
+        if connection.get("type") == "serial" and "port" in connection:
+            warnings.append(
+                f"devices.{dev_id}.connection.port: ignored (deprecated) — the "
+                f"persistent name is derived from the device id "
+                f"(/dev/atomiqa/{dev_id}); remove the field"
+            )
+
     # --- channels -> circuits ---
     circuit_users: dict[str, str] = {}
     for ch_id, channel in channels.items():

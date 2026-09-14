@@ -31,6 +31,42 @@ def test_all_shipped_fragments_are_valid():
     ]
 
 
+def test_saved_device_fragment_keeps_connection_and_reimports(tmp_path):
+    """B18: 'Save as Component' keeps the connection block — it carries
+    nothing machine-specific anymore (no port; the persistent name is
+    derived from the device id) — so a saved fragment re-imports cleanly."""
+    import json
+
+    device = copy.deepcopy(ganged_config()["devices"]["pico_1"])
+    device["connection"]["port"] = "/dev/stale"     # legacy field of an old config
+    device.get("connection", {}).pop("port", None)  # what _save_component strips
+
+    fragment = em.fragment_to_json(device, "device", "saved_pico")
+    path = tmp_path / "saved_pico.json"
+    path.write_text(json.dumps(fragment))
+
+    loaded = em.load_fragment(str(path))
+    assert loaded["kind"] == "device"
+    assert loaded["data"]["connection"]["type"] == "serial"
+
+    # assemble a minimal bench from the saved fragment (the "Add from
+    # Library…" path) — it must validate without errors
+    fragments = {f["suggested_id"]: f for f in em.list_fragments([LIBRARY_DIR])[0]}
+    cfg = em.new_config()
+    pico_id = em.add_device(cfg, loaded["data"], loaded.get("suggested_id", "device"))
+    del cfg["devices"][pico_id]["capabilities"]["acquisition"]  # dummy fills that role
+    dummy_id = em.add_device(cfg, em.load_fragment(fragments["dummy_acq"]["path"])["data"], "dummy_acq")
+    board_id = em.add_circuit(cfg, em.load_fragment(fragments["board_ch1"]["path"])["data"], "board_ch1")
+    em.set_role(cfg, "timing", pico_id)
+    em.set_role(cfg, "gain_ch1", pico_id)
+    em.set_role(cfg, "acquisition", dummy_id)
+    em.set_channel(cfg, "ch1", board_id)
+    for cap_id, pin in (("c100", 2), ("c560", 3), ("c3300", 4)):
+        em.set_connection(cfg, "ch1", cap_id, pin)
+    errors, _warnings = em.validate(cfg, REGISTRY)
+    assert errors == []
+
+
 def test_library_assembly_of_bench_test_config():
     """Timing+gain on the Pico, virtual acquisition — as assembled in the editor."""
     cfg = em.new_config()
@@ -90,7 +126,7 @@ def test_dummy_acquisition_in_manager(tmp_path):
     for device in manager.devices.values():  # no real serial ports on the bench CI
         if not getattr(device, "IS_VIRTUAL", False):
             device.connect = lambda: True
-    assert manager.connect_all() == []
+    assert manager.connect_all() == {}  # empty dict = every device connected
     assert manager.acquisition.arm() is True
     assert manager.acquisition.start_measurement(None, None) is True
     assert manager.acquisition.stop_measurement() is True

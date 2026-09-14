@@ -53,7 +53,7 @@ def _pico_bench() -> dict:
             "pico_1": {
                 "name": "Pico 2 (all roles)",
                 "driver": "pico_serial_v1",
-                "connection": {"type": "serial", "port": "/dev/pico_daq", "baud_rate": 115200},
+                "connection": {"type": "serial", "baud_rate": 115200},
                 "capabilities": {
                     "timing": {
                         "integration_time_us": {"min": 1, "max": 10_000_000, "step": 1},
@@ -142,13 +142,13 @@ def split_config() -> dict:
     cfg["devices"]["pic_g2"] = {
         "name": "PIC — CH2 gain controller",
         "driver": "pic_serial_v1",
-        "connection": {"type": "serial", "port": "/dev/pic_gain_ch2", "baud_rate": 115200},
+        "connection": {"type": "serial", "baud_rate": 115200},
         "capabilities": {"gain": {"pins": [2]}},
     }
     cfg["devices"]["pico_t"] = {
         "name": "Pico 2 — timing controller",
         "driver": "pico_serial_v1",
-        "connection": {"type": "serial", "port": "/dev/pico_timing", "baud_rate": 115200},
+        "connection": {"type": "serial", "baud_rate": 115200},
         "capabilities": {
             "timing": {
                 "integration_time_us": {"min": 1, "max": 10_000_000, "step": 1},

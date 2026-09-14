@@ -319,11 +319,12 @@ class HardwareConfigEditorDialog(QDialog):
         conn_type = connection.get("type", "?")
         form.addRow("Transport:", QLabel(conn_type))
         if conn_type == "serial":
-            port_input = QLineEdit(str(connection.get("port") or ""))
-            port_input.editingFinished.connect(
-                lambda: self._on_connection_changed("port", port_input.text().strip())
+            persistent = QLabel(
+                f"/dev/atomiqa/{dev_id}   [derived from the device id — created "
+                f"by the udev rule]"
             )
-            form.addRow("Serial port:", port_input)
+            persistent.setStyleSheet("color: #666;")
+            form.addRow("Persistent name:", persistent)
             baud = QSpinBox()
             baud.setRange(0, 10_000_000)
             baud.setValue(int(connection.get("baud_rate", 115200)))
@@ -607,7 +608,11 @@ class HardwareConfigEditorDialog(QDialog):
             QMessageBox.information(self, "Save as Component", "Select an entry first.")
             return
         if kind == "device":
-            data.pop("connection", None)  # transport is machine-specific
+            # The connection block carries nothing machine-specific anymore
+            # (no port: the persistent name is derived from the device id);
+            # keep it so the fragment re-imports cleanly. Drop a stale
+            # deprecated 'port' field if the source JSON still has one.
+            data.get("connection", {}).pop("port", None)
 
         suggested = item_id or kind
         name, ok = QInputDialog.getText(self, "Save as Component", "Component id:", text=suggested)

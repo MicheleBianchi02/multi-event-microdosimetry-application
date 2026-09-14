@@ -2,20 +2,21 @@
 """
 Generate udev rules for the serial devices of a hardware configuration.
 
-Each device entry of hardware_config.json names its port as a persistent udev
-symlink (e.g. "/dev/pico_timing"). This tool reads the configuration, looks at
-the serial devices currently plugged in, and emits one udev rule per device —
+The config carries no port: the persistent name of each device is derived from
+its id, /dev/atomiqa/<device_id>. This tool reads the configuration, looks at
+the serial boards currently plugged in, and emits one udev rule per device —
 matched by USB serial number (unique per board) with VID/PID fallback — that
-creates exactly that symlink. Run it once when a setup is first cabled.
+creates exactly that symlink. Run it once when a setup is first cabled, after
+editing the device ids, or after replacing a board.
 
 Usage:
     python3 tools/generate_udev_rules.py --config <hardware_config.json>      # print rules
     python3 tools/generate_udev_rules.py --config <...> --write               # install (root)
     sudo ./setup_udev_rules.sh <hardware_config.json>                         # same, via wrapper
 
-The mapping is interactive: for each configured port the currently plugged
-candidates are listed and you pick the right board (unplug/plug or check the
-USB serial to be sure). Non-interactive: pass --map PORT=SERIAL repeatedly.
+The mapping is interactive: for each device the currently plugged candidates
+are listed and you pick the right board (unplug/plug or check the USB serial
+to be sure). Non-interactive: pass --map DEVICE_ID=SERIAL repeatedly.
 """
 import argparse
 import glob
@@ -28,13 +29,12 @@ RULES_FILE = "/etc/udev/rules.d/99-atomiqa.rules"
 
 
 def configured_serial_devices(config: dict) -> list:
-    """[(device_id, symlink_name)] for every serial device with a port set."""
+    """[(device_id, symlink_name)] for every serial device."""
     result = []
     for dev_id, dev in config.get("devices", {}).items():
         connection = dev.get("connection", {})
-        port = connection.get("port")
-        if connection.get("type") == "serial" and port:
-            result.append((dev_id, os.path.basename(port)))
+        if connection.get("type") == "serial":
+            result.append((dev_id, f"atomiqa/{dev_id}"))
     return result
 
 
@@ -93,8 +93,8 @@ def build_rule(symlink: str, candidate: dict) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", required=True, help="hardware_config.json of the setup")
-    parser.add_argument("--map", action="append", default=[], metavar="PORT=SERIAL",
-                        help="non-interactive mapping, e.g. --map pico_timing=E6614C311B8B4D34")
+    parser.add_argument("--map", action="append", default=[], metavar="DEVICE_ID=SERIAL",
+                        help="non-interactive mapping, e.g. --map pico_1=E6614C311B8B4D34")
     parser.add_argument("--write", action="store_true", help="write the rules file and reload udev (needs root)")
     args = parser.parse_args()
 
@@ -103,7 +103,7 @@ def main() -> int:
 
     wanted = configured_serial_devices(config)
     if not wanted:
-        print("No serial devices with a port configured in this file.")
+        print("No serial devices in this configuration.")
         return 1
 
     plugged = usb_serial_devices()
@@ -135,7 +135,7 @@ def main() -> int:
             if len(available) == 1:
                 candidate = available[0]
             else:
-                print(f"Which plugged device is '{dev_id}' (port /dev/{symlink})?")
+                print(f"Which plugged device is '{dev_id}' (persistent /dev/{symlink})?")
                 for i, c in enumerate(available):
                     print(f"  [{i}] {c['tty']}  serial {c['serial'] or '(none)'}")
                 while True:
@@ -146,7 +146,7 @@ def main() -> int:
         used.add(candidate["tty"])
         rule = build_rule(symlink, candidate)
         if not candidate["serial"]:
-            print(f"warning: {candidate['tty']} has no USB serial; the rule for {symlink} "
+            print(f"warning: {candidate['tty']} has no USB serial; the rule for {dev_id} "
                   f"matches VID/PID only and is ambiguous between identical boards")
         rules.append(rule)
         print(f"{dev_id}: /dev/{symlink} <- {candidate['tty']}")

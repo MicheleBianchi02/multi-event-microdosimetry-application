@@ -32,7 +32,7 @@ Severity scale:
   now means only overflow or (debug mode) a negative start→stop difference.
   Regression tests: `tests/test_data_model.py`.
 
-### B2 — Connection failures are always reported as success — **PARTIALLY FIXED**
+### B2 — Connection failures are always reported as success — **FIXED**
 - **Intended:** connection is driven by the loaded hardware configuration JSON.
   On Linux each device gets a persistent name via a udev rule — one rule per
   device (four in the general case: timing µC, two gain µCs, readout system);
@@ -59,6 +59,32 @@ Severity scale:
   per-device manual-connect dialog for partial setups (the current dialog maps
   one port at a time). One-udev-rule-per-device is now generated from the
   hardware config (`tools/generate_udev_rules.py`).
+- **Fixed (2026-09-14):** connection is button-driven (no attempt at startup
+  or on config load). Step 1 shows a connection card — one status row per
+  configured device — with **Auto Connect** (opens every configured
+  `connection.port`, i.e. the udev persistent names), **Manual Connect…** and
+  **Simulate**. On auto-connect failure the per-device manual-connect dialog
+  opens automatically with the per-device errors: one row per configured
+  *device* (roles shown as a column), an available-port combo per serial
+  device (ports taken by another row hidden, configured port preselected when
+  present), per-row Connect and Connect All with live status; Done requires
+  every role-assigned device connected. The mapping is session-only and never
+  written to the config; on Windows auto-connect fails fast into the manual
+  dialog (same code path, no platform check). `HardwareManager` gained
+  `connect_device` / `connection_status` / `all_role_devices_connected`, and
+  `connect_all` now returns dev_id → error message. `verify_connection` was
+  removed from the drivers (never called; an identity check will return as a
+  capability-gated method when the firmware rework provides a unique
+  per-board code) and the dead `SerialDevice` class was dropped from
+  `services/serial_device.py` (only the port enumeration `get_port()`
+  remains).
+  Follow-up (same day): the config no longer carries a `connection.port` at
+  all — the persistent name is derived from the device id
+  (`/dev/atomiqa/<id>`, one udev rule per device creating exactly that
+  symlink; `tools/generate_udev_rules.py` is keyed by device id). A leftover
+  `port` field in an older file is ignored with a deprecation warning, so
+  the config file is fully machine-independent.
+  Regression tests: `tests/test_hardware_manager.py`, `tests/test_manual_connect.py`.
 
 ### B3 — Manual port mapping passes the port name instead of the device path — **FIXED**
 - **Intended:** from the manual-connect dialog (see B2), mapping a configured
@@ -164,7 +190,7 @@ Severity scale:
   acquisition device can measure, and the wizard disables the dual-channel
   choice when `max_channels < 2`.
 
-### B18 — "Save as Component…" writes fragments that fail re-import validation
+### B18 — "Save as Component…" writes fragments that fail re-import validation — **FIXED**
 - **Intended:** a component saved from the hardware config editor can be
   re-imported from the library without errors.
 - **Current:** `_save_component` (`views/hardware_config_editor.py`) strips the
@@ -176,6 +202,12 @@ Severity scale:
   (empty port like the shipped fragments) instead of removing the block.
 - Not fixed yet: the connection/transport handling is being reworked first
   (deferred with the auto-connect work, B2).
+- **Fixed (2026-09-14):** with the port-less config (see B2) the connection
+  block carries nothing machine-specific anymore: "Save as Component…" keeps
+  it whole, dropping only a stale deprecated `port` field if the source JSON
+  still has one. The shipped fragments lost their empty-port convention with
+  the same change. Regression test: `tests/test_library.py`
+  (`test_saved_device_fragment_keeps_connection_and_reimports`).
 
 ### B19 — Gain application on shared GPIO pins is sequential, not atomic — **FIXED**
 - **Intended:** when the same uC controls the gain of two circuits, the

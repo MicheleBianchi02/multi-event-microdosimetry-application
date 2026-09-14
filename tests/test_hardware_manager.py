@@ -142,8 +142,144 @@ def test_invalid_config_raises(tmp_path):
 def test_connect_all_reports_failures(pico_file, monkeypatch):
     manager = HardwareManager()
     manager.load_config(pico_file)
-    monkeypatch.setattr(manager.devices["pico_1"], "connect", lambda: False)
-    assert manager.connect_all() == ["pico_1"]
+    manager.devices["pico_1"] = FakeSerialDevice(connect_result=False)
+    failed = manager.connect_all()
+    assert list(failed.keys()) == ["pico_1"]
+    assert failed["pico_1"]  # non-empty error message
+
+
+# ----------------------------------------------------------------------
+# Connection API (auto-connect via configured ports, manual per-device
+# mapping — session-only)
+# ----------------------------------------------------------------------
+
+class FakeSerialDevice:
+    """Duck-typed replacement for a serial driver (connect state is
+    controllable per instance; the real drivers expose is_connected as a
+    class property, which cannot be overridden per instance)."""
+
+    def __init__(self, port="/dev/fake", baud_rate=115200, connect_result=True):
+        self._port = port
+        self._baud_rate = baud_rate
+        self.is_connected = False
+        self._connect_result = connect_result
+        self.set_params_calls = []
+
+    def connect(self) -> bool:
+        if self._connect_result:
+            self.is_connected = True
+            return True
+        self.is_connected = False
+        return False
+
+    def disconnect(self) -> bool:
+        self.is_connected = False
+        return True
+
+    def set_connection_params(self, port, baud_rate) -> None:
+        self.set_params_calls.append((port, baud_rate))
+        self._port = port
+        self._baud_rate = baud_rate
+
+
+def test_connect_device_ok_and_failure(pico_file):
+    manager = HardwareManager()
+    manager.load_config(pico_file)
+    fake = FakeSerialDevice(connect_result=True)
+    manager.devices["pico_1"] = fake
+    assert manager.connect_device("pico_1") == (True, "")
+    assert manager.connection_status()["pico_1"]["connected"] is True
+
+    failing = FakeSerialDevice(connect_result=False)
+    manager.devices["pico_1"] = failing
+    ok, error = manager.connect_device("pico_1")
+    assert ok is False and error
+
+
+def test_persistent_port_derived_from_device_id(pico_file):
+    """The config carries no port: at load each serial device gets the
+    persistent name derived from its id (created by the admin's udev rule)."""
+    manager = HardwareManager()
+    manager.load_config(pico_file)
+    assert manager.devices["pico_1"]._port == "/dev/atomiqa/pico_1"
+    assert manager.devices["pico_1"]._baud_rate == 115200
+    assert manager.connection_status()["pico_1"]["port"] == "/dev/atomiqa/pico_1"
+
+
+def test_connect_device_unknown_id(pico_file):
+    manager = HardwareManager()
+    manager.load_config(pico_file)
+    ok, error = manager.connect_device("does_not_exist")
+    assert ok is False and "not found" in error
+
+
+def test_set_device_port_routes_to_driver(pico_file):
+    manager = HardwareManager()
+    manager.load_config(pico_file)
+    fake = FakeSerialDevice()
+    manager.devices["pico_1"] = fake
+    assert manager.set_device_port("pico_1", "/dev/ttyUSB42") is True
+    # baud rate comes from the config, the port from the manual mapping
+    assert fake.set_params_calls == [("/dev/ttyUSB42", 115200)]
+    assert fake._port == "/dev/ttyUSB42"
+
+
+def test_role_device_ids_and_device_roles(tmp_path):
+    from helpers import split_config
+
+    cfg = split_config()
+    cfg["devices"]["ni_1"]["driver"] = "pic_serial_v1"  # NI not registered yet
+    cfg["devices"]["ni_1"]["capabilities"]["acquisition"] = {
+        "num_channels": 2,
+        "adc": {"bits": 12, "input_ranges_volts": [{"min_volts": 0.0, "max_volts": 5.0}]},
+    }
+    path = tmp_path / "split.json"
+    path.write_text(json.dumps(cfg))
+    manager = HardwareManager()
+    manager.load_config(str(path))
+    # unique, role order, no duplicates for multi-role devices
+    assert manager.role_device_ids() == ["pico_t", "ni_1", "pico_1", "pic_g2"]
+    assert manager.device_roles("pico_1") == ["gain_ch1"]
+    assert manager.device_roles("pico_t") == ["timing"]
+
+
+def test_all_role_devices_connected(tmp_path):
+    from helpers import split_config
+
+    cfg = split_config()
+    cfg["devices"]["ni_1"]["driver"] = "pic_serial_v1"
+    cfg["devices"]["ni_1"]["capabilities"]["acquisition"] = {
+        "num_channels": 2,
+        "adc": {"bits": 12, "input_ranges_volts": [{"min_volts": 0.0, "max_volts": 5.0}]},
+    }
+    path = tmp_path / "split.json"
+    path.write_text(json.dumps(cfg))
+    manager = HardwareManager()
+    manager.load_config(str(path))
+    assert manager.all_role_devices_connected() is False
+
+    for dev_id in manager.role_device_ids():
+        manager.devices[dev_id] = FakeSerialDevice()
+        assert manager.connect_device(dev_id) == (True, "")
+    assert manager.all_role_devices_connected() is True
+
+    # one role device dropping breaks the wizard gate
+    manager.devices["pico_t"].is_connected = False
+    assert manager.all_role_devices_connected() is False
+
+
+def test_connection_status_shape(pico_file):
+    manager = HardwareManager()
+    manager.load_config(pico_file)
+    status = manager.connection_status()
+    assert set(status.keys()) == {"pico_1"}
+    info = status["pico_1"]
+    assert info["name"] == "Pico 2 (all roles)"
+    assert info["driver"] == "pico_serial_v1"
+    assert info["transport"] == "serial"
+    assert info["port"] == "/dev/atomiqa/pico_1"
+    assert info["baud_rate"] == 115200
+    assert info["connected"] is False
 
 
 def test_shipped_example_config_loads():
@@ -267,7 +403,7 @@ def _pic_bench(two_channel: bool) -> dict:
         "pic_1": {
             "name": "PIC (all roles)",
             "driver": "pic_serial_v1",
-            "connection": {"type": "serial", "port": "/dev/pic_daq", "baud_rate": 115200},
+            "connection": {"type": "serial", "baud_rate": 115200},
             "capabilities": {
                 "timing": {
                     "integration_time_us": {"min": 1, "max": 512_000_000, "step": 1},
@@ -349,7 +485,7 @@ def test_apply_gains_reports_unknown_state_on_partial_device_failure(tmp_path):
             "pico_g1": {
                 "name": "Pico timing + gain CH1",
                 "driver": "pico_serial_v1",
-                "connection": {"type": "serial", "port": "/dev/pico_g1", "baud_rate": 115200},
+                "connection": {"type": "serial", "baud_rate": 115200},
                 "capabilities": {
                     "timing": {
                         "integration_time_us": {"min": 1, "max": 10_000_000, "step": 1},
@@ -371,7 +507,7 @@ def test_apply_gains_reports_unknown_state_on_partial_device_failure(tmp_path):
             "pic_g2": {
                 "name": "PIC gain CH2",
                 "driver": "pic_serial_v1",
-                "connection": {"type": "serial", "port": "/dev/pic_g2", "baud_rate": 115200},
+                "connection": {"type": "serial", "baud_rate": 115200},
                 "capabilities": {"gain": {"pins": [2]}},
             },
         },

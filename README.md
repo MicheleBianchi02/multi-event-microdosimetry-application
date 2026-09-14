@@ -229,16 +229,33 @@ Four estimators are computed over the (ROI-filtered) data, each with uncertainti
 2. **Wizard.** *Welcome* → **Step 1**: choose the operation mode (ME or SE) and
    connect the hardware. Proceeding requires a measurement setup: a workspace
    whose linked hardware configuration has been loaded (or simulation).
-   Connection is driven by the loaded hardware configuration JSON. On Linux each device gets a persistent name via a **udev rule — one rule
-   per device** (four in the general case: timing µC, two gain µCs, readout
-   system), and the app **auto-connects** to all configured devices at startup or
-   on demand (auto-connect button). When auto-connect fails — e.g. on Windows, a
-   device is not connected, or the udev rules are missing — a **manual-connect
-   dialog** opens, letting the user map each configured device to an available
-   connection. If **Single Event** is chosen, the electronics is switched to SE
-   and the app shows a static waiting screen (with a button to switch back to ME);
-   no data is collected. If **Multi Event** is chosen, the user proceeds to
-   **Step 2**.
+   Connection is driven by the loaded hardware configuration JSON and is
+   **button-driven** — nothing connects automatically at startup or on config
+   load. The step shows a *connection card* with one status row per configured
+   device and three actions:
+   - **Auto Connect** opens every device's persistent name — `/dev/atomiqa/<device_id>`,
+     derived from the config, which itself carries no port (the file stays
+     machine-independent). On Linux the names are created by **udev rules —
+     one rule per device** (four in the general case: timing µC, two gain
+     µCs, readout system; see §5.1 of HARDWARE_CONFIG.md), each matching the
+     board by USB serial number. When the rules are missing, a device is
+     unplugged or the ports do not exist (e.g. on Windows), the attempt
+     fails fast and the *manual-connect dialog* opens automatically with the
+     per-device errors.
+   - **Manual Connect…** opens the same dialog on demand: one row per
+     configured *device* (not per role — one board may hold several roles),
+     an available-port combo per serial device (ports taken by another row are
+     hidden; the udev names are not listed, they belong to the auto path),
+     per-row Connect and Connect All with live status. Virtual devices need
+     no port. The mapping is **session-only**: nothing is written back to the
+     hardware configuration. On Windows this is the normal way to connect.
+   - **Simulate** replaces the hardware with synthetic data.
+
+   "Connected" means the port opened; the wizard gate opens only when every
+   role-assigned device is connected (or simulation is active). If **Single
+   Event** is chosen, the electronics is switched to SE and the app shows a
+   static waiting screen (with a button to switch back to ME); no data is
+   collected. If **Multi Event** is chosen, the user proceeds to **Step 2**.
 3. **Timing, gain and metadata configuration.** A physics planning page (Bragg /
    SOBP curves from FLUKA data, gas multiplication factor g, integration-time and
    measurement-time limits) helps choosing the integration time; the setup page
@@ -348,10 +365,9 @@ severities in [BUG.md](BUG.md)):
 
 | # | Area | Intended | Current | Bug |
 |---|---|---|---|---|
-| 1 | Connection handling | per-device auto-connect (one udev rule per device) with manual fallback | connect-all only; a manual dialog maps one device at a time; `verify_connection` still unused | B2 |
-| 2 | ADC bit depth in `DataModel` | histogram bins/overflow derived from the ADC bits | bits/range flow from the config into the archives, but `DataModel` still uses fixed 12-bit bins | B6 |
-| 3 | Ramp sampling | ramp samples acquired and stored | timing triggers only; acquisition side not implemented (deferred by design, not a bug) | — |
-| 4 | Dead legacy code | removed | superseded drivers in `services/`, unused ACF/PACF, `if False:` block remain | B17 |
+| 1 | ADC bit depth in `DataModel` | histogram bins/overflow derived from the ADC bits | bits/range flow from the config into the archives, but `DataModel` still uses fixed 12-bit bins | B6 |
+| 2 | Ramp sampling | ramp samples acquired and stored | timing triggers only; acquisition side not implemented (deferred by design, not a bug) | — |
+| 3 | Dead legacy code | removed | superseded drivers in `services/`, unused ACF/PACF, `if False:` block remain | B17 |
 
 ## 6. Open design points
 
@@ -365,8 +381,11 @@ severities in [BUG.md](BUG.md)):
   extension of `set_event_mode`.
 - **Ramp sampling acquisition**: reader and storage for ramp samples (the timing
   side is ready).
-- **Connection verification**: whether the `verify_connection` (`V`) handshake
-  is part of the connect flow or is removed — to be decided.
+- **Device identity check**: with the firmware rework, a capability-gated
+  identity handshake (the firmware returning a unique per-board code) would
+  let auto-connect confirm it opened the right board and the manual dialog
+  suggest mappings automatically; the old unused `V` handshake was removed
+  (B2).
 - **Debug-only run path**: the application always acquires in debug mode (start/stop
   recorded). Operational mode and single-channel toggles have been removed from the
   setup UI: channel count is governed by the hardware config, and acquisition operates
@@ -390,7 +409,8 @@ severities in [BUG.md](BUG.md)):
 ```bash
 python app.py [-s | --simulate] [-b | --baud-rate N] [-c | --single-channel] [--debug]
 python build.py          # PyInstaller bundle
-sudo ./setup_udev_rules.sh   # persistent device names, e.g. /dev/pico_daq
+sudo ./setup_udev_rules.sh   # persistent device names: /dev/atomiqa/<device_id>
+                             # how to write the rules by hand: UDEV_RULES.md
 ```
 
 Dependencies: see `pyproject.toml` (PyQt6, pyqtgraph, numpy, pandas, pyserial,

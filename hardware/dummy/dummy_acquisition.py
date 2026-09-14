@@ -31,6 +31,10 @@ class DummyAcquisition(IDataAcquisition):
     def disconnect(self) -> bool:
         return True
 
+    @property
+    def is_connected(self) -> bool:
+        return True
+
     def arm(self) -> bool:
         return True
 

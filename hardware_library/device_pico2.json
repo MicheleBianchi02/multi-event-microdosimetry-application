@@ -5,8 +5,8 @@
     "data": {
         "name": "Pico 2",
         "driver": "pico_serial_v1",
-        "connection": {"type": "serial", "port": "", "baud_rate": 115200},
-        "note": "Fill in the serial port (udev name) after inserting into a config.",
+        "connection": {"type": "serial", "baud_rate": 115200},
+        "note": "No port to fill in: the app opens /dev/atomiqa/<device id>, created by the udev rule.",
         "capabilities": {
             "timing": {
                 "integration_time_us": {"min": 1, "max": 10000000, "step": 1},

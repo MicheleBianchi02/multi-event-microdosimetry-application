@@ -151,7 +151,7 @@ class SetupWindow(QWidget):
         # File load signals
         self.import_data.load_signal.connect(self.on_file_loaded)
 
-        self.start_config.setting_window.connection_successfull.connect(
+        self.start_config.connection_widget.connection_successfull.connect(
             self.connection_successfull
         )
         self.start_config.mode_window.mode_selected.connect(
@@ -165,8 +165,8 @@ class SetupWindow(QWidget):
         self.init_ui()
 
     @property
-    def setting_window(self):
-        return self.start_config.setting_window
+    def connection_widget(self):
+        return self.start_config.connection_widget
 
     @property
     def time_window(self):
@@ -511,9 +511,14 @@ class SetupWindow(QWidget):
         self.stack_view.setCurrentIndex(0)
         self.header_frame.hide()
         self.footer_frame.hide()
-        self.start_config.setting_window.restart_event()
+        self.start_config.connection_widget.restart_event()
         self.session.single_event = None
-        self.is_hardware_connected = False
+        # The wizard gate reopens without a forced reconnect when the bench
+        # is still fully connected; otherwise the user connects again.
+        if self.hardware_manager and self.hardware_manager.all_role_devices_connected():
+            self.is_hardware_connected = True
+        else:
+            self.is_hardware_connected = False
 
         self.back_bnt.setVisible(True)
         self.next_bnt.setVisible(True)

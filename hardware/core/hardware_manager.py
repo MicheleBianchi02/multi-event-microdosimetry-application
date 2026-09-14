@@ -21,6 +21,16 @@ from hardware.registry import DRIVER_REGISTRY, registry_descriptors
 logger = logging.getLogger(__name__)
 
 
+def persistent_port_name(dev_id: str) -> str:
+    """Persistent port of a device, derived from its config id.
+
+    The hardware config carries no port: the admin's udev rule maps each
+    physical board (matched by USB serial number) to
+    ``SYMLINK+="atomiqa/<device_id>"``, and the app opens ``/dev/atomiqa/<id>``.
+    """
+    return f"/dev/atomiqa/{dev_id}"
+
+
 class HardwareManager:
     """
     Central manager for hardware connections and capability routing.
@@ -90,6 +100,15 @@ class HardwareManager:
                 self.devices[dev_id] = registered.create(device_config.connection, device_config)
             except Exception:
                 logger.exception("Failed to instantiate device %s", dev_id)
+                continue
+            # The persistent name is derived from the device id (the config
+            # deliberately carries no port); the manual-connect dialog may
+            # override it for the session.
+            if device_config.connection.get("type") == "serial":
+                self.devices[dev_id].set_connection_params(
+                    persistent_port_name(dev_id),
+                    device_config.connection.get("baud_rate", 115200),
+                )
 
         self.acquisition = self.devices.get(config.roles.acquisition)
         self.timing = self.devices.get(config.roles.timing)
@@ -221,20 +240,93 @@ class HardwareManager:
     # Connections
     # ------------------------------------------------------------------
 
-    def connect_all(self) -> list:
-        """Connect all configured devices; returns the list of failed device IDs."""
-        failed = []
-        for dev_id, device in self.devices.items():
-            if hasattr(device, "connect"):
-                try:
-                    if not device.connect():
-                        failed.append(dev_id)
-                except Exception:
-                    logger.exception("connect failed for %s", dev_id)
-                    failed.append(dev_id)
-            else:
-                logger.warning("Device %s does not have a connect method.", dev_id)
+    def role_device_ids(self) -> list:
+        """Unique device IDs referenced by the assigned roles (first-seen order)."""
+        if not self.config:
+            return []
+        roles = self.config.roles
+        return list(
+            dict.fromkeys(
+                dev_id
+                for dev_id in (roles.timing, roles.acquisition, roles.gain_ch1, roles.gain_ch2)
+                if dev_id is not None
+            )
+        )
+
+    def connect_device(self, dev_id: str) -> tuple:
+        """Connect one configured device; returns (ok, error message).
+
+        A serial device with no port configured (empty in the config, not yet
+        mapped in the manual dialog) is rejected instead of silently failing
+        inside the driver.
+        """
+        device = self.devices.get(dev_id)
+        if device is None:
+            return False, f"device {dev_id!r} not found in the loaded configuration"
+        if not hasattr(device, "connect"):
+            return False, f"device {dev_id!r} does not support connecting"
+        if self.config.devices[dev_id].connection.get("type") == "serial":
+            # _port comes from the config (may be empty there) or from a
+            # session-only manual mapping; a serial device without one cannot
+            # connect (the driver would fail silently).
+            if not getattr(device, "_port", None):
+                return False, "no port configured — select one in Manual Connect"
+        try:
+            if device.connect():
+                return True, ""
+        except Exception as exc:
+            logger.exception("connect failed for %s", dev_id)
+            return False, str(exc)
+        return False, "could not open the connection (port missing, busy or wrong device?)"
+
+    def connect_all(self) -> Dict[str, str]:
+        """Connect all configured devices; returns dev_id -> error message.
+
+        An empty dict means every device is connected (auto-connect path).
+        """
+        failed = {}
+        for dev_id in self.devices:
+            ok, error = self.connect_device(dev_id)
+            if not ok:
+                failed[dev_id] = error
         return failed
+
+    def connection_status(self) -> Dict[str, dict]:
+        """Per-device connection snapshot for the connection card and dialog."""
+        status = {}
+        for dev_id, device_config in (self.config.devices.items() if self.config else {}):
+            device = self.devices.get(dev_id)
+            connection = device_config.connection
+            status[dev_id] = {
+                "name": device_config.name,
+                "driver": device_config.driver,
+                "transport": connection.get("type"),
+                "port": getattr(device, "_port", None) if device else connection.get("port"),
+                "baud_rate": connection.get("baud_rate", 115200) if connection.get("type") == "serial" else None,
+                "connected": bool(device.is_connected) if (device and hasattr(device, "is_connected")) else False,
+            }
+        return status
+
+    def device_roles(self, dev_id: str) -> list:
+        """Roles assigned to one device, for display ('timing, gain_ch1', ...)."""
+        if not self.config:
+            return []
+        roles = self.config.roles
+        return [
+            role_name
+            for role_name, holder in (
+                ("timing", roles.timing),
+                ("gain_ch1", roles.gain_ch1),
+                ("gain_ch2", roles.gain_ch2),
+                ("acquisition", roles.acquisition),
+            )
+            if holder == dev_id
+        ]
+
+    def all_role_devices_connected(self) -> bool:
+        """Whether every role-assigned device is connected (the wizard gate)."""
+        status = self.connection_status()
+        return bool(status) and all(status[dev_id]["connected"] for dev_id in self.role_device_ids())
 
     def disconnect_all(self) -> None:
         for dev_id, device in self.devices.items():
@@ -245,15 +337,17 @@ class HardwareManager:
                     logger.exception("disconnect failed for %s", dev_id)
 
     def set_device_port(self, dev_id: str, port: str) -> bool:
-        if dev_id in self.devices:
-            device = self.devices[dev_id]
-            if hasattr(device, "_port"):
-                device._port = port
-                return True
+        """Session-only endpoint override (manual connect); never persisted."""
+        device = self.devices.get(dev_id)
+        if device is None:
+            logger.error("Device %s not found.", dev_id)
+            return False
+        if not hasattr(device, "set_connection_params"):
             logger.warning("Device %s does not support port assignment.", dev_id)
             return False
-        logger.error("Device %s not found.", dev_id)
-        return False
+        device_config = self.config.devices[dev_id]
+        device.set_connection_params(port, device_config.connection.get("baud_rate", 115200))
+        return True
 
     # ------------------------------------------------------------------
     # Timing & Arming

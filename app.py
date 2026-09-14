@@ -50,7 +50,7 @@ class AppController(QObject):
 
         # Views refresh their hardware-dependent parts when a config is loaded
         self.hardware_manager.add_config_listener(
-            lambda _m: self.main_window.setup_view.setting_window.reload_devices()
+            lambda _m: self.main_window.setup_view.connection_widget.update_devices()
         )
 
         # Load the hardware config linked to the active workspace, if any
@@ -380,21 +380,12 @@ class AppController(QObject):
         self.measurement_controller.simulate = True
         self.main_window.simulate = True
         self.main_window.setup_view.simulate = True
-        self.main_window.setup_view.setting_window.simulate = True
         self.main_window.setup_view.time_window.simulate = True
         self.main_window.running_view.simulate = True
 
-        # Refresh the port table to show Simulated Port if not already present
-        self.setup_controller.refresh_ports()
-
-        # Select the first row (Simulated Port)
-        self.main_window.setup_view.setting_window.port_table.selectRow(0)
-
-        # Automatically connect to simulation
-        self.main_window.setup_view.setting_window.selected_port = "Simulated Port"
-        self.main_window.setup_view.setting_window.on_connection_result(
-            True, "Simulation connection established."
-        )
+        # The connection card switches to "simulation active" and opens the
+        # wizard gate (no hardware is touched).
+        self.main_window.setup_view.connection_widget.set_simulated(True)
 
     def _on_stop_measurement(self):
         self.measurement_controller.handle_stop_measurement()

@@ -8,10 +8,9 @@
             "firmware_version": "1.4",
             "connection": {
                 "type": "serial",
-                "port": "/dev/pico_daq",
                 "baud_rate": 115200
             },
-            "note": "udev rule 99-atomiqa-pico.rules creates /dev/pico_daq.",
+            "note": "No port here: auto-connect opens /dev/atomiqa/pico_1, the udev rule (SYMLINK+=\"atomiqa/pico_1\") creates it.",
             "capabilities": {
                 "timing": {
                     "integration_time_us": { "min": 1, "max": 10000000, "step": 1 },

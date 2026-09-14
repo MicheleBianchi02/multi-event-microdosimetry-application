@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import QMessageBox
 from models.session_model import SessionModel
 from services.analysis_service import AnalysisService
 from services.hardware_service import HardwareService
-from services.serial_device import get_port
+from views.manual_connect_dialog import ManualConnectDialog
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ class SetupController(QObject):
         self.main_window = main_window
         # Get references to the specific setup views
         self.setup_view = self.main_window.setup_view
-        self.setting_window = self.setup_view.setting_window
+        self.connection_widget = self.setup_view.connection_widget
         self.time_window = self.setup_view.time_window
         self.analysis_view = self.time_window.analysis_widget
 
@@ -47,40 +47,68 @@ class SetupController(QObject):
         self.analysis_view.set_initial_data(self.unique_energies)
 
         self._bind_signals()
-        self.auto_connect()
 
-    def auto_connect(self):
+    # ------------------------------------------------------------------
+    # Connection handling (button-driven: auto via the configured udev
+    # ports, manual fallback via the per-device dialog — never automatic
+    # on config load)
+    # ------------------------------------------------------------------
+
+    def on_auto_connect_requested(self):
         if self.setup_view.simulate:
             return
 
-        if not self.hardware.hardware_manager.is_loaded:
-            self.setting_window.on_connection_result(
+        manager = self.hardware.hardware_manager
+        if not manager.is_loaded:
+            self.connection_widget.on_connect_result(
                 False,
-                "No hardware configuration loaded — use 'Load Hardware Config' or Simulate.",
+                "No hardware configuration loaded — load a workspace or use Simulate.",
             )
             return
 
-        failed = self.check_connection()
+        failed = manager.connect_all()
         if not failed:
             note = (
                 " (acquisition is virtual: no data will be collected)"
-                if self.hardware.hardware_manager.acquisition_is_virtual
+                if manager.acquisition_is_virtual
                 else ""
             )
-            self.setting_window.on_connection_result(
-                True, f"All devices auto-connected successfully.{note}"
+            self.connection_widget.on_connect_result(
+                True, f"All devices connected.{note}"
             )
-        else:
-            QMessageBox.warning(
-                self.setting_window, 
-                "Hardware Connection Failed", 
-                f"Could not auto-connect to devices: {', '.join(failed)}\n\nPlease connect them manually using the panel."
+            return
+
+        self.connection_widget.on_connect_result(
+            False,
+            "Auto-connect failed — check the cabling and the udev rules "
+            "(setup_udev_rules.sh), or map the ports manually.",
+        )
+        # Auto-connect failure (missing udev rules, device unplugged,
+        # Windows, ...) opens the manual-connect dialog directly.
+        self._open_manual_connect_dialog(initial_errors=failed)
+
+    def on_manual_connect_requested(self):
+        manager = self.hardware.hardware_manager
+        if not manager.is_loaded:
+            self.connection_widget.on_connect_result(
+                False,
+                "No hardware configuration loaded — load a workspace or use Simulate.",
             )
+            return
+        self._open_manual_connect_dialog()
+
+    def _open_manual_connect_dialog(self, initial_errors: dict = None):
+        manager = self.hardware.hardware_manager
+        dialog = ManualConnectDialog(manager, self.connection_widget, initial_errors=initial_errors)
+        dialog.exec()
+        self.connection_widget.update_devices()
+        if manager.all_role_devices_connected():
+            self.connection_widget.on_connect_result(True, "All devices connected.")
 
     def _bind_signals(self):
-        self.setting_window.connect_requested.connect(self.on_connect_requested)
-        self.setting_window.ports_refresh_requested.connect(self.refresh_ports)
-        self.setting_window.simulate_requested.connect(self.simulate_requested.emit)
+        self.connection_widget.auto_connect_requested.connect(self.on_auto_connect_requested)
+        self.connection_widget.manual_connect_requested.connect(self.on_manual_connect_requested)
+        self.connection_widget.simulate_requested.connect(self.simulate_requested.emit)
         self.time_window.apply_configuration_requested.connect(
             self.on_apply_configuration_requested
         )
@@ -97,26 +125,6 @@ class SetupController(QObject):
         self.analysis_view.plot_unc_requested.connect(self.on_analysis_plot_unc)
         self.analysis_view.export_requested.connect(self.on_analysis_export)
         self.analysis_view.custom_import_requested.connect(self.on_custom_import)
-
-        self.refresh_ports()
-
-    def refresh_ports(self):
-        self.setting_window.fill_port_table(get_port())
-
-    def on_connect_requested(self, dev_id: str, port: str):
-        try:
-            self.hardware.hardware_manager.set_device_port(dev_id, port)
-            failed = self.check_connection()
-            if not failed:
-                self.setting_window.on_connection_result(
-                    True, "All devices connected successfully."
-                )
-            else:
-                self.setting_window.on_connection_result(
-                    False, f"Devices failed: {', '.join(failed)}"
-                )
-        except Exception as e:
-            self.setting_window.on_connection_result(False, f"Serial Error: {str(e)}")
 
     def on_apply_configuration_requested(self, config: dict):
         hw_mgr = self.hardware.hardware_manager
@@ -168,10 +176,6 @@ class SetupController(QObject):
         self.session.period_s = actual.period_us / 1e6
         self.session.sample_freq = actual.sample_frequency_hz
         self.time_window.update_actual_timing(actual)
-
-    def check_connection(self) -> list[str]:
-        """Called when user presses 'Connect' or during auto-connect. Returns list of failed device IDs."""
-        return self.hardware.hardware_manager.connect_all()
 
     def on_mode_switched(self):
         # The SE/ME line belongs to the gain controllers: the command goes to

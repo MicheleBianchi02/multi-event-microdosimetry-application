@@ -58,8 +58,8 @@ connection) accepts an optional free-text `"note"`.
     "name": "Pico 2 — all roles",
     "driver": "pico_serial_v1",
     "firmware_version": "1.4",
-    "connection": { "type": "serial", "port": "/dev/pico_daq", "baud_rate": 115200 },
-    "note": "udev rule 99-atomiqa-pico.rules creates /dev/pico_daq.",
+    "connection": { "type": "serial", "baud_rate": 115200 },
+    "note": "No port here: the app opens /dev/atomiqa/pico_1, the udev rule creates it (§5.1).",
     "capabilities": {
         "timing":      { ... },
         "gain":        { "pins": [2, 3, 4] },
@@ -73,7 +73,7 @@ connection) accepts an optional free-text `"note"`.
 | `name` | Human-readable name, shown in the app and written into the archives. |
 | `driver` | Stable code selecting the communication implementation (`pico_serial_v1`, `pic_serial_v1`, `dummy_v1`). Must be known to the app. |
 | `firmware_version` | Optional, informational; recorded in the archives. |
-| `connection` | Transport: `type: "serial"` with `port` (persistent udev name, e.g. `/dev/pico_daq`) and `baud_rate`; or `type: "dummy"` for the virtual acquisition device (no port). |
+| `connection` | Transport: `type: "serial"` with `baud_rate`, or `type: "dummy"` for the virtual acquisition device. **No port**: the file stays machine-independent — the persistent name is derived from the device id (`/dev/atomiqa/<id>`, §5.1). A leftover `port` field from an older file is ignored with a warning. |
 | `capabilities` | What this device can do in this setup. Declare a block only if the device is used for it. |
 
 A device is *usable* in a role only if it declares the matching capability
@@ -269,14 +269,14 @@ assemble into complete configurations:
 
 `kind` is `device` or `circuit`; `suggested_id` pre-fills the identifier in
 the assembled configuration (made unique if already taken); `data` has
-exactly the shape of a `devices`/`circuits` entry. Fragment files for
-devices carry an **empty serial port** on purpose: the port is
-machine-specific and must be filled in after insertion.
+exactly the shape of a `devices`/`circuits` entry. Since the connection
+carries no port (§2.1), a device fragment is complete as shipped: there is
+nothing machine-specific to fill in after insertion.
 
 Shipping a new component into the library = dropping a fragment file into
 the folder; conversely, the editor's **"Save as Component…"** writes the
-selected device or circuit as a new fragment (device fragments are saved
-without the serial connection, which is machine-specific).
+selected device or circuit as a new fragment (devices keep their whole
+connection block; a stale deprecated `port` field is dropped).
 
 Shipped components:
 
@@ -309,11 +309,11 @@ Workspace Settings → **Hardware Configuration**:
   linked. If a file with the same name already exists in the workspace with
   different content, overwriting must be confirmed.
 - **Edit…** — opens the linked configuration. Interface-determined values
-  (driver, timing envelope, gain pins, ADC properties) are shown **read-only**
-  with their physical limits as hints; everything that belongs to the bench —
-  capacitor values, wiring, roles, channels, names, notes, serial port — is
-  editable. Changes are validated live; the file can only be saved when it
-  has no errors.
+  (driver, timing envelope, gain pins, ADC properties, the derived persistent
+  name) are shown **read-only** with their physical limits as hints;
+  everything that belongs to the bench — capacitor values, wiring, roles,
+  channels, names, notes, baud rate — is editable. Changes are validated
+  live; the file can only be saved when it has no errors.
 - **New from Components…** — assembles a fresh configuration from the library.
 - **Remove Link** — unlinks the configuration (the file stays on disk);
   real-hardware features are then disabled.
@@ -368,29 +368,42 @@ For quick bench tests the expert simply creates a test workspace (e.g.
 
 ### 5.1 Persistent port names (udev rules)
 
-The `connection.port` of each serial device must be a **persistent name**
-created by a udev rule — not the raw `ttyACM0`, which changes with the plug
-order. One rule per device, matched by the board's **USB serial number**
-(unique per board; two identical Picos stay distinguishable):
+The configuration file deliberately carries **no port**: the persistent name
+of every serial device is **derived from its id** as `/dev/atomiqa/<id>` —
+e.g. the device `pico_1` is always opened at `/dev/atomiqa/pico_1`. The
+config therefore stays machine-independent (it can be reused on another
+machine or years later); what binds a *physical board* to that name is one
+udev rule per device, matched by the board's **USB serial number** (unique
+per board; two identical Picos stay distinguishable — and the rule needs no
+`ttyACMx`, which changes with the plug order, at all):
 
 ```
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0009", ATTRS{serial}=="E6614C31…", SYMLINK+="pico_timing"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0009", ATTRS{serial}=="E6614C31…", SYMLINK+="atomiqa/pico_1"
 ```
 
-The rules are generated **from the hardware configuration** (the symlink
-names are exactly the configured ports):
+Write the rules by hand, or generate them **from the hardware
+configuration** (the symlink names are exactly the device ids):
 
 ```bash
 sudo ./setup_udev_rules.sh <workspace>/hardware_config.json
 ```
 
 The tool lists the currently plugged boards and asks which is which (or use
-`--map PORT=SERIAL` non-interactively, see `tools/generate_udev_rules.py`),
-then writes `/etc/udev/rules.d/99-atomiqa.rules` and reloads udev. Run it
-once when a setup is first cabled, after editing the configuration's ports,
-or after replacing a board. An old `99-daq-devices.rules` from previous app
-versions can be deleted. Access permissions are unchanged: the user needs
-the usual serial-port group (e.g. `dialout`).
+`--map DEVICE_ID=SERIAL` non-interactively, see
+`tools/generate_udev_rules.py`), then writes
+`/etc/udev/rules.d/99-atomiqa.rules` and reloads udev. Run it once when a
+setup is first cabled, after renaming a device id, or after replacing a
+board. **Step-by-step instructions for writing the rules by hand** are in
+[UDEV_RULES.md](UDEV_RULES.md). An old `99-daq-devices.rules` from previous
+app versions can be deleted; configs written before the port removal still
+load (their leftover `connection.port` is ignored with a warning). Access
+permissions are unchanged: the user needs the usual serial-port group
+(e.g. `dialout`).
+
+Where the rules are missing (another machine, Windows) or a board is
+unplugged, auto-connect fails fast and the manual-connect dialog maps each
+device to an available port for the current session — nothing is written
+back to the configuration.
 
 ---
 

@@ -198,6 +198,17 @@ class TestSemanticErrors:
         model = build_channel_gain_model(config, "ch2")
         assert model.options == []  # fixed = 0, nothing wired
 
+    def test_serial_port_field_is_deprecated_warning(self):
+        """The config carries no port (the persistent name is derived from
+        the device id); a leftover 'port' field is ignored with a warning."""
+        cfg = all_pico_config()
+        cfg["devices"]["pico_1"]["connection"]["port"] = "/dev/pico_daq"
+        config = load(cfg, FULL_REGISTRY)
+        assert any(
+            "ignored (deprecated)" in w and "/dev/atomiqa/pico_1" in w
+            for w in config.warnings
+        )
+
     def test_partially_wired_circuit_gain_table(self):
         cfg = all_pico_config()
         cfg["connections"] = [
