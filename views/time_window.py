@@ -33,7 +33,7 @@ class TimeWindow(QWidget):
     sent_successfull = pyqtSignal()
     editing_time = pyqtSignal()
     apply_configuration_requested = pyqtSignal(dict)
-    timing_calculation_requested = pyqtSignal(float, float, object)
+    timing_calculation_requested = pyqtSignal(float, float, object, object)
 
     def __init__(self, session_model, simulate: bool, hardware_manager=None) -> None:
         super().__init__()
@@ -445,7 +445,15 @@ class TimeWindow(QWidget):
             # (the drivers would reject them at configure time).
             self._inputs_valid = self._validate_timing_inputs(final_int, final_rst, final_period)
 
-            self.timing_calculation_requested.emit(final_int, final_rst, final_period)
+            # Ramp dt travels with the request: the true-values preview is
+            # ramp-aware (generator selection and quantization depend on it).
+            final_dt = None
+            if self.sample_ramp_cb.isVisible() and self.sample_ramp_cb.isChecked():
+                try:
+                    final_dt = float(self.ramp_dt_input.text())
+                except ValueError:
+                    final_dt = None
+            self.timing_calculation_requested.emit(final_int, final_rst, final_period, final_dt)
         except ValueError:
             self._inputs_valid = False
         self._update_apply_enabled()

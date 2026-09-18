@@ -84,6 +84,12 @@ Severity scale:
   symlink; `tools/generate_udev_rules.py` is keyed by device id). A leftover
   `port` field in an older file is ignored with a deprecation warning, so
   the config file is fully machine-independent.
+  Identity follow-up (2026-09-16): with the PICO2DAQ 2.0 firmware the `V`
+  handshake returned as a liveness check inside the Pico driver's
+  `connect()` — the firmware replies with name, version, unique per-board
+  id and system clock, and a wrong board or bare Pico refuses the
+  connection. Full board-id matching against the config remains open
+  (README §6).
   Regression tests: `tests/test_hardware_manager.py`, `tests/test_manual_connect.py`.
 
 ### B3 — Manual port mapping passes the port name instead of the device path — **FIXED**

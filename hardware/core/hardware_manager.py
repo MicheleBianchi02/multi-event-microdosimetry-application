@@ -360,6 +360,29 @@ class HardwareManager:
         logger.error("No timing controller assigned to arm")
         return False
 
+    def start_timing_signal(self) -> bool:
+        """Start the timing engine when its start is NOT owned by the
+        acquisition start (virtual acquisition on the bench, split setups):
+        the measurement start button must still run the real timing signals,
+        only nothing is recorded.  When one physical device holds both roles
+        the acquisition start_measurement sends the start, so this is a
+        no-op (a second start would be refused mid-run)."""
+        timing = self.timing
+        if timing is None:
+            return False
+        if timing is self.acquisition:
+            return True
+        return timing.start_timing()
+
+    def stop_timing_signal(self) -> bool:
+        """Symmetric stop for start_timing_signal()."""
+        timing = self.timing
+        if timing is None:
+            return False
+        if timing is self.acquisition:
+            return True
+        return timing.stop_timing()
+
     def set_timing_channels(self, multiple_channel: bool) -> bool:
         if self.timing is not None:
             return self.timing.set_channels(multiple_channel)
@@ -382,6 +405,100 @@ class HardwareManager:
             num_channels = len(self.active_channels) if self.config else 1
             return self.timing.calculate_actual_timing(int_time_us, reset_time_us, period_us, num_channels)
         return None
+
+    def calculate_ramp_timing(
+        self,
+        ramp_dt_us: float,
+        int_time_us: float,
+        reset_time_us: float,
+    ) -> Optional[ActualTiming]:
+        """Ramp-aware preview from the driver's exact mirror (generator
+        selection + applied quantized values — the numbers the firmware's
+        'Q' reports).  None when the timing device has no ramp mirror
+        (e.g. the PIC) or cannot represent the request."""
+        if self.timing is None or not hasattr(self.timing, "calculate_ramp_timing"):
+            return None
+        try:
+            return self.timing.calculate_ramp_timing(ramp_dt_us, int_time_us, reset_time_us)
+        except ValueError as exc:
+            logger.warning("ramp timing preview rejected: %s", exc)
+            return None
+
+    # ------------------------------------------------------------------
+    # Timing-mode routing (internal / ramp / window markers)
+    # ------------------------------------------------------------------
+
+    def timing_mode_for(self, sample_ramp: bool) -> str:
+        """Which timing mode a measurement with this hardware uses.
+
+        - 'ramp': the user requested ramp sampling;
+        - 'markers': split hardware (the timing device does not hold the
+          acquisition role) and it can emit triggers: with ramp sampling
+          UNchecked the timing device still runs its ramp generator with
+          dt = integration time — two CONV_START edges per window spaced
+          by T_int (integration start / end) for the external digitizer;
+        - 'internal': classic no-ramp on the device's own ADC (all-in-one
+          setups, or a timing device without trigger capability — e.g. the
+          PIC — which falls back with a warning).
+        """
+        if sample_ramp:
+            return "ramp"
+        if (
+            self.timing is not None
+            and self.timing is not self.acquisition
+            and getattr(self.timing, "supports_ramp_sampling", False)
+        ):
+            return "markers"
+        if self.timing is not None and self.timing is not self.acquisition:
+            logger.warning(
+                "the timing device cannot emit window markers — running "
+                "without conversion triggers for the external digitizer"
+            )
+        return "internal"
+
+    def configure_timing(
+        self,
+        sample_ramp: bool,
+        ramp_dt_us: float,
+        int_time_us: float,
+        reset_time_us: float,
+        period_us: Optional[float] = None,
+    ) -> bool:
+        """Configure the timing device for a measurement, routed by
+        timing_mode_for(): ramp sampling as requested, window markers
+        (ramp generator with dt = int) on split hardware without ramp
+        sampling, classic no-ramp otherwise."""
+        if self.timing is None:
+            logger.error("No timing controller assigned")
+            return False
+        mode = self.timing_mode_for(sample_ramp)
+        if mode == "ramp":
+            return self.timing.configure_ramp(ramp_dt_us, int_time_us, reset_time_us, period_us)
+        if mode == "markers":
+            # dt = int: N = int/dt + 1 = 2 pulses per integration window
+            return self.timing.configure_ramp(int_time_us, int_time_us, reset_time_us, period_us)
+        return self.timing.configure_noramp(int_time_us, reset_time_us, period_us)
+
+    def preview_timing(
+        self,
+        sample_ramp: bool,
+        ramp_dt_us: Optional[float],
+        int_time_us: float,
+        reset_time_us: float,
+        period_us: Optional[float] = None,
+    ) -> tuple:
+        """True-values preview routed like configure_timing(); returns
+        (ActualTiming | None, mode).  The marker/ramp previews come from
+        the driver's exact mirror (what the firmware's 'Q' reports)."""
+        mode = self.timing_mode_for(sample_ramp)
+        actual = None
+        if mode == "ramp" and ramp_dt_us is not None:
+            actual = self.calculate_ramp_timing(ramp_dt_us, int_time_us, reset_time_us)
+        elif mode == "markers":
+            actual = self.calculate_ramp_timing(int_time_us, int_time_us, reset_time_us)
+        if actual is None:
+            actual = self.calculate_actual_timing(int_time_us, reset_time_us, period_us)
+        return actual, mode
 
     # ------------------------------------------------------------------
     # Acquisition settings

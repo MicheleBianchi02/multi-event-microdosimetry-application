@@ -32,6 +32,11 @@ class SessionModel(QObject):
         # The app always acquires in debug mode (start/stop stored); it is
         # only set to False while an old operational-mode archive is loaded.
         self._debug_mode = True
+        # What the timing controller generates during a measurement:
+        # 'internal' (classic no-ramp on the device's own ADC), 'ramp'
+        # (ramp-sampling triggers), or 'markers' (integration-window markers
+        # for an external digitizer = degenerate ramp with dt = int).
+        self.timing_mode = "internal"
 
         self.baud_rate = 115200
         self.port = None

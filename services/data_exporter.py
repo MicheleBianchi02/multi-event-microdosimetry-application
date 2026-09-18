@@ -95,7 +95,8 @@ class DataExporter:
                 # (the relationship of the current firmware generations).
                 "period_s": getattr(session_model, 'period_s', 0.0)
                 or getattr(session_model, 'int_time', 0.0) + getattr(session_model, 'reset_time', 0.0),
-                "sample_frequency_hz": getattr(session_model, 'sample_freq', 0.0)
+                "sample_frequency_hz": getattr(session_model, 'sample_freq', 0.0),
+                "timing_mode": getattr(session_model, 'timing_mode', 'internal')
             },
             "analysis": {
                 "analysis_timestamp": analysis_meta.get("analysis_timestamp"),

@@ -38,7 +38,15 @@ class HardwareService:
                 logger.error("No acquisition hardware assigned")
                 self._error = True
                 return False
-                
+
+            # A timing device that does not hold the acquisition role (e.g.
+            # virtual acquisition on the bench) must still run its signals:
+            # the start goes to it directly, only nothing is recorded.
+            if not self.hardware_manager.start_timing_signal():
+                logger.error("Starting the timing engine failed")
+                self._error = True
+                return False
+
             success = self.hardware_manager.acquisition.start_measurement(self.session, self.data_model)
             if not success:
                 self._error = True
@@ -61,10 +69,16 @@ class HardwareService:
             self._thread.join(timeout=2.0)
 
         if send_stop:
+            ok = True
             if self.hardware_manager.acquisition:
-                return self.hardware_manager.acquisition.stop_measurement()
+                ok = self.hardware_manager.acquisition.stop_measurement()
             else:
-                return False
+                ok = False
+            # Symmetric to the start: stop a timing engine that was started
+            # directly (no-op when the acquisition owns the stop).
+            if not self.hardware_manager.stop_timing_signal():
+                ok = False
+            return ok
         return True
 
     def has_error(self) -> bool:

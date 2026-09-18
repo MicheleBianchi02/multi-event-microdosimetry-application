@@ -157,20 +157,31 @@ class SetupController(QObject):
             self.time_window.on_configuration_result(False)
             logger.exception("Communication failed")
 
-    def on_timing_calculation_requested(self, int_time_s: float, reset_time_s: float, period_s: float = None):
+    def on_timing_calculation_requested(
+        self, int_time_s: float, reset_time_s: float, period_s: float = None,
+        ramp_dt_us: float = None,
+    ):
         hw_mgr = self.hardware.hardware_manager
         if not hw_mgr.timing:
             logger.error("No timing controller assigned")
             return
 
         period_us = period_s * 1e6 if period_s is not None else None
-        # Via the manager: it injects the config's active channel count, which
-        # the PIC quantization (TX delay) depends on.
-        actual = hw_mgr.calculate_actual_timing(
-            int_time_s * 1e6,
-            reset_time_s * 1e6,
-            period_us,
+        # Routed preview: ramp sampling -> the driver's exact mirror; split
+        # hardware without ramp sampling -> window markers (dt = int, the
+        # degenerate ramp feeding the external digitizer); otherwise plain
+        # timing (PIC quantization depends on the channel count, injected
+        # by the manager).
+        actual, mode = hw_mgr.preview_timing(
+            sample_ramp=ramp_dt_us is not None,
+            ramp_dt_us=ramp_dt_us,
+            int_time_us=int_time_s * 1e6,
+            reset_time_us=reset_time_s * 1e6,
+            period_us=period_us,
         )
+        if actual is None:
+            return
+        self.session.timing_mode = mode
         self.session.int_time = actual.int_time_us / 1e6
         self.session.reset_time = actual.reset_time_us / 1e6
         self.session.period_s = actual.period_us / 1e6
@@ -210,27 +221,27 @@ class SetupController(QObject):
             return False
         self.session.multiple_channel = (num_active > 1)
 
-        # Timing registers.
+        # Timing registers, routed by the manager: ramp sampling as
+        # requested, window markers on split hardware without ramp
+        # sampling (dt = int, 2 pulses per window for the digitizer),
+        # classic no-ramp otherwise.
         period_us = timer_params.get("period_us")
-        if timer_params.get("sample_ramp", False):
-            if not hw_mgr.can_ramp_while_acquiring:
-                logger.error(
-                    "Ramp sampling rejected: the timing device cannot generate "
-                    "ramp triggers while acquiring."
-                )
-                return False
-            success = timing.configure_ramp(
-                timer_params.get("ramp_dt_us", 10.0),
-                timer_params["int_time_us"],
-                timer_params["reset_time_us"],
-                period_us=period_us,
+        sample_ramp = bool(timer_params.get("sample_ramp", False))
+        ramp_dt_us = timer_params.get("ramp_dt_us", 10.0)
+        if sample_ramp and not hw_mgr.can_ramp_while_acquiring:
+            logger.error(
+                "Ramp sampling rejected: the timing device cannot generate "
+                "ramp triggers while acquiring."
             )
-        else:
-            success = timing.configure_noramp(
-                timer_params["int_time_us"],
-                timer_params["reset_time_us"],
-                period_us=period_us,
-            )
+            return False
+        self.session.timing_mode = hw_mgr.timing_mode_for(sample_ramp)
+        success = hw_mgr.configure_timing(
+            sample_ramp,
+            ramp_dt_us,
+            timer_params["int_time_us"],
+            timer_params["reset_time_us"],
+            period_us=period_us,
+        )
         if not success:
             logger.error("Timing configuration rejected by the timing device")
             return False

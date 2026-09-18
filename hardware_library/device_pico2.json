@@ -5,24 +5,51 @@
     "data": {
         "name": "Pico 2",
         "driver": "pico_serial_v1",
-        "connection": {"type": "serial", "baud_rate": 115200},
-        "note": "No port to fill in: the app opens /dev/atomiqa/<device id>, created by the udev rule.",
+        "firmware_version": "2.0",
+        "connection": {
+            "type": "serial",
+            "baud_rate": 115200
+        },
+        "note": "Firmware PICO2DAQ 2.0. Pin map (GPIO, not pad position): GP14 integrator reset, GP15 ramp trigger, GP16 event mode, GP17-19 capacitor bits 0-2, GP26 ADC input (0-3.3 V, no front-end scaler). No port to fill in: the app opens /dev/atomiqa/<device id>, created by the udev rule.",
         "capabilities": {
             "timing": {
-                "integration_time_us": {"min": 1, "max": 10000000, "step": 1},
-                "reset_time_us": {"min": 1, "max": 10000000, "step": 1},
+                "integration_time_us": {
+                    "min": 5,
+                    "max": 10000000,
+                    "step": 1
+                },
+                "reset_time_us": {
+                    "min": 5,
+                    "max": 10000000,
+                    "step": 1
+                },
                 "period_us": null,
                 "ramp_sampling": {
                     "supported": true,
-                    "dt_us": {"min": 10, "max": 10000, "step": 10}
+                    "dt_us": {
+                        "min": 1,
+                        "max": 4360,
+                        "step": 1
+                    }
                 }
             },
-            "gain": {"pins": [2, 3, 4]},
+            "gain": {
+                "pins": [
+                    17,
+                    18,
+                    19
+                ]
+            },
             "acquisition": {
                 "num_channels": 1,
                 "adc": {
                     "bits": 12,
-                    "input_ranges_volts": [{"min_volts": 0.0, "max_volts": 5.0}],
+                    "input_ranges_volts": [
+                        {
+                            "min_volts": 0.0,
+                            "max_volts": 3.3
+                        }
+                    ],
                     "supports_oversampling": false
                 }
             }

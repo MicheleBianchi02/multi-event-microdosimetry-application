@@ -61,7 +61,7 @@ def test_saved_device_fragment_keeps_connection_and_reimports(tmp_path):
     em.set_role(cfg, "gain_ch1", pico_id)
     em.set_role(cfg, "acquisition", dummy_id)
     em.set_channel(cfg, "ch1", board_id)
-    for cap_id, pin in (("c100", 2), ("c560", 3), ("c3300", 4)):
+    for cap_id, pin in (("c100", 17), ("c560", 18), ("c3300", 19)):
         em.set_connection(cfg, "ch1", cap_id, pin)
     errors, _warnings = em.validate(cfg, REGISTRY)
     assert errors == []
@@ -88,7 +88,7 @@ def test_library_assembly_of_bench_test_config():
     em.set_role(cfg, "gain_ch1", pico_id)
     em.set_role(cfg, "acquisition", dummy_id)
     em.set_channel(cfg, "ch1", board_id)
-    for cap_id, pin in (("c100", 2), ("c560", 3), ("c3300", 4)):
+    for cap_id, pin in (("c100", 17), ("c560", 18), ("c3300", 19)):
         em.set_connection(cfg, "ch1", cap_id, pin)
 
     errors, warnings = em.validate(cfg, REGISTRY)

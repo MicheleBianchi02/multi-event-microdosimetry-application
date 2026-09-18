@@ -43,9 +43,11 @@ def test_declared_timing_limits(pico_file):
     manager = HardwareManager()
     manager.load_config(pico_file)
     limits = manager.declared_timing_limits()
-    assert limits["integration_time_us"] == {"min": 1, "max": 10_000_000, "step": 1}
+    assert limits["integration_time_us"] == {"min": 5, "max": 10_000_000, "step": 1}
+    assert limits["reset_time_us"] == {"min": 5, "max": 10_000_000, "step": 1}
     assert limits["ramp_sampling"]["supported"] is True
-    assert limits["ramp_sampling"]["dt_us"]["min"] == 10
+    assert limits["ramp_sampling"]["dt_us"]["min"] == 1
+    assert limits["ramp_sampling"]["dt_us"]["max"] == 4360
 
 
 def test_adc_settings_from_config(pico_file):
@@ -54,7 +56,7 @@ def test_adc_settings_from_config(pico_file):
     adc = manager.get_adc_settings()
     assert adc["bits"] == 12
     assert adc["num_channels"] == 1
-    assert adc["input_range_volts"] == {"min_volts": 0.0, "max_volts": 5.0}
+    assert adc["input_range_volts"] == {"min_volts": 0.0, "max_volts": 3.3}
 
 
 def test_apply_gain_sends_device_mask(pico_file):
@@ -376,10 +378,10 @@ def test_atomic_apply_gains(tmp_path):
 def test_b20_multiple_capacitors_summed_per_pin(tmp_path):
     """Verify that multiple capacitors wired to the same pin have their capacitances summed."""
     cfg = all_pico_config()
-    # Wire both c100 and c560 to pin 2
+    # Wire both c100 and c560 to pin 17
     cfg["connections"] = [
-        {"device": "pico_1", "pin": 2, "circuit": "board_ch1", "capacitor": "c100"},
-        {"device": "pico_1", "pin": 2, "circuit": "board_ch1", "capacitor": "c560"},
+        {"device": "pico_1", "pin": 17, "circuit": "board_ch1", "capacitor": "c100"},
+        {"device": "pico_1", "pin": 17, "circuit": "board_ch1", "capacitor": "c560"},
     ]
     path = tmp_path / "multi_cap.json"
     path.write_text(json.dumps(cfg))
@@ -488,17 +490,17 @@ def test_apply_gains_reports_unknown_state_on_partial_device_failure(tmp_path):
                 "connection": {"type": "serial", "baud_rate": 115200},
                 "capabilities": {
                     "timing": {
-                        "integration_time_us": {"min": 1, "max": 10_000_000, "step": 1},
-                        "reset_time_us": {"min": 1, "max": 10_000_000, "step": 1},
+                        "integration_time_us": {"min": 5, "max": 10_000_000, "step": 1},
+                        "reset_time_us": {"min": 10, "max": 10_000_000, "step": 1},
                         "period_us": None,
-                        "ramp_sampling": {"supported": True, "dt_us": {"min": 10, "max": 10_000, "step": 10}},
+                        "ramp_sampling": {"supported": True, "dt_us": {"min": 10, "max": 4360, "step": 10}},
                     },
                     "gain": {"pins": [2, 3]},
                     "acquisition": {
                         "num_channels": 2,
                         "adc": {
                             "bits": 12,
-                            "input_ranges_volts": [{"min_volts": 0.0, "max_volts": 5.0}],
+                            "input_ranges_volts": [{"min_volts": 0.0, "max_volts": 3.3}],
                             "supports_oversampling": False,
                         },
                     },

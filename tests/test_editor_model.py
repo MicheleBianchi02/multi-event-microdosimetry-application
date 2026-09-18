@@ -169,15 +169,15 @@ class TestAssembly:
 
     def test_set_connection_replaces_edge(self):
         cfg = sample_config()
-        em.set_connection(cfg, "ch1", "c100", 4)
-        em.set_connection(cfg, "ch1", "c100", 2)
+        em.set_connection(cfg, "ch1", "c100", 19)
+        em.set_connection(cfg, "ch1", "c100", 17)
         edges = [
             c
             for c in cfg["connections"]
             if c["circuit"] == "board_ch1" and c["capacitor"] == "c100"
         ]
-        assert len(edges) == 1 and edges[0]["pin"] == 2
-        assert em.connection_of(cfg, "ch1", "c100") == 2
+        assert len(edges) == 1 and edges[0]["pin"] == 17
+        assert em.connection_of(cfg, "ch1", "c100") == 17
 
     def test_set_connection_unwire(self):
         cfg = sample_config()
@@ -202,7 +202,7 @@ class TestValidation:
         em.set_role(cfg, "acquisition", dummy_id)
         em.set_channel(cfg, "ch1", board_id)
         for cap_id in ("c100", "c560", "c3300"):
-            em.set_connection(cfg, "ch1", cap_id, {"c100": 2, "c560": 3, "c3300": 4}[cap_id])
+            em.set_connection(cfg, "ch1", cap_id, {"c100": 17, "c560": 18, "c3300": 19}[cap_id])
 
         errors, _ = em.validate(cfg, REGISTRY)
         assert errors == []

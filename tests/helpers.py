@@ -3,19 +3,28 @@ Shared test helpers: hardware-config builders and registry descriptors used
 by several test modules (kept here so the test files stay independent of
 each other).
 """
-from hardware.config.schema import DriverDescriptor, FixedValue, ParameterBounds, RampSamplingConfig, TimingCapability
+from hardware.config.schema import (
+    DriverDescriptor,
+    FixedValue,
+    ParameterBounds,
+    RampSamplingConfig,
+    TimingCapability,
+    VoltageRange,
+)
 
+# Mirrors the real PicoSerialDAQ (firmware PICO2DAQ 2.0): the firmware
+# validates 'T'/'P' against the same numbers.
 PICO_DESCRIPTOR = DriverDescriptor(
     capabilities=frozenset({"timing", "gain", "acquisition"}),
     timing=TimingCapability(
-        integration_time_us=ParameterBounds(1, 10_000_000, 1),
-        reset_time_us=ParameterBounds(1, 10_000_000, 1),
+        integration_time_us=ParameterBounds(5, 10_000_000, 1),
+        reset_time_us=ParameterBounds(5, 10_000_000, 1),
         period_us=None,
-        ramp_sampling=RampSamplingConfig(True, dt_us=ParameterBounds(10, 10_000, 10)),
+        ramp_sampling=RampSamplingConfig(True, dt_us=ParameterBounds(0.1, 65536.0 * 10.0 / 150.0, 0.1)),
     ),
     gain_max_pins=3,
     adc_bits=12,
-    adc_native_range=None,
+    adc_native_range=VoltageRange(0.0, 3.3),
 )
 
 PIC_DESCRIPTOR = DriverDescriptor(
@@ -56,20 +65,20 @@ def _pico_bench() -> dict:
                 "connection": {"type": "serial", "baud_rate": 115200},
                 "capabilities": {
                     "timing": {
-                        "integration_time_us": {"min": 1, "max": 10_000_000, "step": 1},
-                        "reset_time_us": {"min": 1, "max": 10_000_000, "step": 1},
+                        "integration_time_us": {"min": 5, "max": 10_000_000, "step": 1},
+                        "reset_time_us": {"min": 5, "max": 10_000_000, "step": 1},
                         "period_us": None,
                         "ramp_sampling": {
                             "supported": True,
-                            "dt_us": {"min": 10, "max": 10_000, "step": 10},
+                            "dt_us": {"min": 1, "max": 4360, "step": 1},
                         },
                     },
-                    "gain": {"pins": [2, 3, 4]},
+                    "gain": {"pins": [17, 18, 19]},
                     "acquisition": {
                         "num_channels": 1,
                         "adc": {
                             "bits": 12,
-                            "input_ranges_volts": [{"min_volts": 0.0, "max_volts": 5.0}],
+                            "input_ranges_volts": [{"min_volts": 0.0, "max_volts": 3.3}],
                             "supports_oversampling": False,
                         },
                     },
@@ -103,10 +112,10 @@ def _pico_bench() -> dict:
             "gain_ch2": "pico_1",
         },
         "connections": [
-            {"device": "pico_1", "pin": 2, "circuit": "board_ch1", "capacitor": "c100"},
-            {"device": "pico_1", "pin": 3, "circuit": "board_ch1", "capacitor": "c560"},
-            {"device": "pico_1", "pin": 4, "circuit": "board_ch1", "capacitor": "c3300"},
-            {"device": "pico_1", "pin": 2, "circuit": "board_ch2", "capacitor": "c100"},
+            {"device": "pico_1", "pin": 17, "circuit": "board_ch1", "capacitor": "c100"},
+            {"device": "pico_1", "pin": 18, "circuit": "board_ch1", "capacitor": "c560"},
+            {"device": "pico_1", "pin": 19, "circuit": "board_ch1", "capacitor": "c3300"},
+            {"device": "pico_1", "pin": 17, "circuit": "board_ch2", "capacitor": "c100"},
         ],
     }
 
@@ -151,10 +160,10 @@ def split_config() -> dict:
         "connection": {"type": "serial", "baud_rate": 115200},
         "capabilities": {
             "timing": {
-                "integration_time_us": {"min": 1, "max": 10_000_000, "step": 1},
+                "integration_time_us": {"min": 5, "max": 10_000_000, "step": 1},
                 "reset_time_us": {"value": 500},
                 "period_us": None,
-                "ramp_sampling": {"supported": True, "dt_us": {"min": 10, "max": 10_000, "step": 10}},
+                "ramp_sampling": {"supported": True, "dt_us": {"min": 1, "max": 4360, "step": 1}},
             }
         },
     }
@@ -194,10 +203,10 @@ def fixed_reset_registry() -> dict:
     descriptor = DriverDescriptor(
         capabilities=frozenset({"timing", "gain", "acquisition"}),
         timing=TimingCapability(
-            integration_time_us=ParameterBounds(1, 10_000_000, 1),
+            integration_time_us=ParameterBounds(5, 10_000_000, 1),
             reset_time_us=FixedValue(500),
             period_us=None,
-            ramp_sampling=RampSamplingConfig(True, dt_us=ParameterBounds(10, 10_000, 10)),
+            ramp_sampling=RampSamplingConfig(True, dt_us=ParameterBounds(0.1, 65536.0 * 10.0 / 150.0, 0.1)),
         ),
         gain_max_pins=3,
         adc_bits=12,

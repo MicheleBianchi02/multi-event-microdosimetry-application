@@ -57,12 +57,12 @@ connection) accepts an optional free-text `"note"`.
 "pico_1": {
     "name": "Pico 2 — all roles",
     "driver": "pico_serial_v1",
-    "firmware_version": "1.4",
+    "firmware_version": "2.0",
     "connection": { "type": "serial", "baud_rate": 115200 },
     "note": "No port here: the app opens /dev/atomiqa/pico_1, the udev rule creates it (§5.1).",
     "capabilities": {
         "timing":      { ... },
-        "gain":        { "pins": [2, 3, 4] },
+        "gain":        { "pins": [17, 18, 19] },
         "acquisition": { ... }
     }
 }
@@ -83,12 +83,12 @@ block (see §2.6 for the role → capability mapping).
 
 ```json
 "timing": {
-    "integration_time_us": { "min": 1, "max": 10000000, "step": 1 },
-    "reset_time_us":       { "min": 1, "max": 10000000, "step": 1 },
+    "integration_time_us": { "min": 5, "max": 10000000, "step": 1 },
+    "reset_time_us":       { "min": 5, "max": 10000000, "step": 1 },
     "period_us":           null,
     "ramp_sampling": {
         "supported": true,
-        "dt_us": { "min": 10, "max": 10000, "step": 10 }
+        "dt_us": { "min": 1, "max": 4360, "step": 1 }
     }
 }
 ```
@@ -120,7 +120,7 @@ this file.
 #### `capabilities.gain`
 
 ```json
-"gain": { "pins": [2, 3, 4] }
+"gain": { "pins": [17, 18, 19] }
 ```
 
 The GPIO pins the device uses to switch capacitors, in **gpio-mask order**:
@@ -136,8 +136,8 @@ is fixed by the device firmware.
     "num_channels": 1,
     "adc": {
         "bits": 12,
-        "input_ranges_volts": [ { "min_volts": 0.0, "max_volts": 5.0 } ],
-        "default_input_range_volts": { "min_volts": 0.0, "max_volts": 5.0 },
+        "input_ranges_volts": [ { "min_volts": 0.0, "max_volts": 3.3 } ],
+        "default_input_range_volts": { "min_volts": 0.0, "max_volts": 3.3 },
         "supports_oversampling": false
     }
 }
@@ -147,7 +147,7 @@ is fixed by the device firmware.
 |---|---|
 | `num_channels` | How many channels can be measured **simultaneously**. This is the binding constraint: a device may time two channels but acquire one (the Pico does). |
 | `adc.bits` | ADC resolution. Fixed by the chip; recorded in every archive. |
-| `adc.input_ranges_volts` | Non-empty list of the voltage spans the device accepts. Exactly one entry = fixed range (as on the Pico: 0…5 V). An instrument such as a NI card lists all selectable ranges (±0.2, ±2.5, ±5, ±10 V, …). |
+| `adc.input_ranges_volts` | Non-empty list of the voltage spans the device accepts. Exactly one entry = fixed range (as on the Pico: 0…3.3 V — the bare ADC pin, no front-end scaler). An instrument such as a NI card lists all selectable ranges (±0.2, ±2.5, ±5, ±10 V, …). |
 | `adc.default_input_range_volts` | Required (and must match one listed range) when more than one range is declared; forbidden when the range is fixed. |
 | `adc.supports_oversampling` | Informational. |
 
@@ -282,7 +282,7 @@ Shipped components:
 
 | Fragment | Provides |
 |---|---|
-| `device_pico2.json` | Raspberry Pi Pico 2 — timing, gain (3 pins), acquisition (1 channel, 12 bit, 0…5 V), ramp sampling. |
+| `device_pico2.json` | Raspberry Pi Pico 2 (firmware PICO2DAQ 2.0) — timing (int ≥ 5 µs, reset ≥ 5 µs, dt 1…4360 µs), gain (3 pins: GP17/18/19), acquisition (1 channel, 12 bit, 0…3.3 V). |
 | `device_pic.json` | PIC — timing (no ramp sampling), gain (1 pin), acquisition (2 channels, 12 bit, 0…5 V). |
 | `device_dummy_acquisition.json` | Virtual acquisition (`dummy_v1`): bench tests only, no data. |
 | `circuit_board_rev_b_ch1.json` | Integrator board rev. B: 22 pF fixed + 100/560/3300 pF switchable. |
@@ -446,11 +446,11 @@ the hardware actually did** (read-only for the analysis):
 
 ```json
 "hardware_settings": {
-    "adc": { "bits": 12, "input_range_volts": { "min_volts": 0.0, "max_volts": 5.0 } },
+    "adc": { "bits": 12, "input_range_volts": { "min_volts": 0.0, "max_volts": 3.3 } },
     "hardware_config_sha256": "…",
     "hardware": {
         "config_file": "hardware_config.json",
-        "devices": { "pico_1": { "name": "...", "driver": "pico_serial_v1", "firmware_version": "1.4" } },
+        "devices": { "pico_1": { "name": "...", "driver": "pico_serial_v1", "firmware_version": "2.0" } },
         "circuits": { "board_ch1": { "fixed_capacitance_pF": 22.0, "switchable_capacitors": [...] } },
         "channels": { "ch1": "board_ch1" },
         "roles":   { "timing": "pico_1", "...": "..." }
@@ -528,8 +528,9 @@ reported as warnings. Pre-3.0 archives instead carry the old
 | Field | Meaning |
 |---|---|
 | `integration_time_s`, `reset_time_s` | The **actual** (quantized) times the hardware used — the values the wizard reported before the run, in seconds. |
-| `period_s` | The measurement period. For the current firmware it equals the sum of the two times; a device with a firmware-derived period may differ. |
+| `period_s` | The measurement period as recorded from the driver's applied-values preview. In `internal` mode it equals int + reset; in `ramp`/`markers` mode it is reset + settle + N·dt (N = int/dt + 1 edges), which differs from the sum of the two times. |
 | `sample_frequency_hz` | `1 / period_s`; converts the `timestamp` column and the time ROIs. |
+| `timing_mode` | What the timing controller generated: `internal` (classic no-ramp on its own ADC), `ramp` (ramp-sampling triggers at the recorded dt) or `markers` (split hardware without ramp sampling: the ramp generator runs with dt = integration time, i.e. two conversion edges per window — integration start/end — for an external digitizer). Additive field; older archives have no `timing_mode` and are always `internal`. |
 
 #### `analysis` — *(editable: the offline interpretation)*
 

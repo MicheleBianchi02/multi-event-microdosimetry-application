@@ -53,6 +53,26 @@ class ITimingController(ABC):
         """
         pass
 
+    def start_timing(self) -> bool:
+        """
+        Start the timing engine WITHOUT the acquisition stream.
+
+        Needed when the device holding the timing role does not also hold
+        the acquisition role (e.g. a virtual acquisition on the bench, or a
+        split setup): the measurement start button must still run the real
+        timing signals, only nothing is recorded.  Devices whose start is
+        owned by their acquisition half (start_measurement sends it) leave
+        this as a no-op — the HardwareManager never calls it in that case.
+        """
+        return True
+
+    def stop_timing(self) -> bool:
+        """
+        Stop the timing engine started by start_timing().  Default no-op,
+        symmetric to start_timing().
+        """
+        return True
+
     @abstractmethod
     def set_channels(self, multiple_channel: bool) -> bool:
         """

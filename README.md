@@ -134,7 +134,9 @@ own provenance.
 **Virtual acquisition.** The registered driver `dummy_v1` fills only the
 `acquisition` role with a no-op device: for bench tests of the timing and gain
 interfaces, a measurement can start (the user is notified that no data will be
-collected) without real readout hardware.
+collected) without real readout hardware. The start/stop still go to the real
+timing device when it does not hold the acquisition role, so its timing
+signals run on the bench while nothing is recorded.
 
 **Capability exclusivity.** Some firmware cannot run two operations
 concurrently — e.g. the Pico cannot generate ramp triggers while its ADC
@@ -155,6 +157,16 @@ disabled with an explanatory tooltip.
 | `set_channels(multiple_channel)` | Tell the timing controller whether one or both channels are active — the command is sent even though the channel count itself comes from the config. No-op on devices that don't need it (the Pico). |
 | `set_mode(debug_mode)` | Select the transmission mode of the electronics (debug: start/stop stored; operational: only the difference). The app always sends debug; devices without a mode command no-op (the Pico). |
 
+> **Window markers (split hardware).** When the timing device does not hold
+> the acquisition role (e.g. the Pico times while an NI card acquires) and
+> ramp sampling is *not* requested, the manager routes the configuration as
+> a degenerate ramp — dt = integration time, i.e. two CONV_START edges per
+> window (integration start/end) on the trigger output — so the external
+> digitizer sees the integration boundaries. The true-values preview, the
+> applied configuration and the firmware's `Q` all report the same numbers
+> (driver mirror), and the archive records the choice in
+> `timing_settings.timing_mode` (`internal` / `ramp` / `markers`).
+
 #### IGainController (`hardware/interfaces/gain.py`)
 
 | Method | Contract |
@@ -171,10 +183,17 @@ disabled with an explanatory tooltip.
 | `set_input_range(min_volts, max_volts)` | Set the ADC voltage input range (for instruments supporting selectable ranges). |
 | `get_adc_settings()` | Properties of the ADC. The authoritative values come from the loaded hardware config (`HardwareManager.get_adc_settings()`: bits, effective input range, channel count); the archived snapshot is used when re-loading a measurement. |
 
-> The concrete driver implementations (Pico, PIC) are being reworked; their
-> protocols will be documented separately once final. `microcontroller_api.md` and
-> `daq_architecture.txt` in this folder describe outdated protocols and folder
-> layouts and should not be relied upon.
+> The Pico driver (`pico_serial_v1`) implements the **PICO2DAQ 2.0**
+> firmware protocol, documented in
+> [raspberry_copy/README.md](raspberry_copy/README.md) (commands, replies,
+> binary frame, end-of-stream marker, pin map, validated limits). Its
+> `connect()` runs the `V` identity handshake as a liveness check (wrong
+> firmware or a system clock other than 150 MHz refuses the connection),
+> and its `calculate_actual_timing` mirrors the firmware's truncation of
+> the times to whole 150 MHz cycles. The PIC implementation still speaks
+> the legacy protocol. `microcontroller_api.md` and `daq_architecture.txt`
+> in this folder describe outdated protocols and folder layouts and should
+> not be relied upon.
 
 ### 2.2 Models, concurrency and performance
 
@@ -381,11 +400,12 @@ severities in [BUG.md](BUG.md)):
   extension of `set_event_mode`.
 - **Ramp sampling acquisition**: reader and storage for ramp samples (the timing
   side is ready).
-- **Device identity check**: with the firmware rework, a capability-gated
-  identity handshake (the firmware returning a unique per-board code) would
-  let auto-connect confirm it opened the right board and the manual dialog
-  suggest mappings automatically; the old unused `V` handshake was removed
-  (B2).
+- **Device identity check**: *liveness done* — the PICO2DAQ 2.0 firmware's
+  `V` handshake returns a unique per-board id and the driver verifies
+  firmware + clock on every connect (wrong board or bare Pico refuses the
+  connection). Still open: matching the board id against the hardware
+  config (per-board entries) so auto-connect confirms it opened exactly the
+  configured board and the manual dialog can suggest mappings.
 - **Debug-only run path**: the application always acquires in debug mode (start/stop
   recorded). Operational mode and single-channel toggles have been removed from the
   setup UI: channel count is governed by the hardware config, and acquisition operates
@@ -394,9 +414,12 @@ severities in [BUG.md](BUG.md)):
 - **Multi file analysis**: the user can analyze multiple measurements at the same
   time (e.g. create a graph of the yD against depth or beam current).
 - **Oversampling**: ADC oversampling could be used to reduce noise.
-- **Concrete driver documentation**: the Pico/PIC implementations will be modified;
-  their serial protocols will be documented when the firmware sources are final
-  (`microcontroller_api.md` / `daq_architecture.txt` are outdated).
+- **Concrete driver documentation**: *Pico done* — the PICO2DAQ 2.0
+  protocol (commands, binary frame, pin map, limits, timing models) is
+  documented in `raspberry_copy/README.md` and mirrored by the driver.
+  Still open: the PIC, which still speaks the legacy protocol
+  (`microcontroller_api.md` / `daq_architecture.txt` are outdated and
+  should not be relied upon).
 - **FFT analysis uncertainties**: the `var_fft` estimator currently reports 0
   for its uncertainties; a bootstrap or propagation scheme is future work.
 - **Multi file analysis**: Analyze multiple measurement at the same time. 

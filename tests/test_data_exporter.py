@@ -41,11 +41,13 @@ def test_settings_dict_v3(loaded_manager, session):
     assert settings["experimental_setup"]["particle"] == session.particle
     hw = settings["hardware_settings"]
     assert hw["adc"]["bits"] == 12
-    assert hw["adc"]["input_range_volts"]["max_volts"] == 5.0
+    assert hw["adc"]["input_range_volts"]["max_volts"] == 3.3
     assert hw["channels"]["ch1"]["gpio_mask"] == [True, False, True]
     assert hw["channels"]["ch1"]["capacitance_pF"] == pytest.approx(3422.0)
     assert hw["hardware_config_sha256"] == loaded_manager.config_sha256
     assert "pico_1" in hw["hardware"]["devices"]
+    # what the timing controller generates (internal / ramp / markers)
+    assert settings["timing_settings"]["timing_mode"] == "internal"
 
 
 def test_zip_roundtrip_with_provenance(loaded_manager, session, tmp_path):
