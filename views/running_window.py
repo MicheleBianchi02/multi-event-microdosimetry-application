@@ -1048,6 +1048,9 @@ class RunningWindow(QWidget):
     def update_results(self, plot_only=False):
         self.calculate_results(plot_only)
 
+        if not plot_only:
+            self.refresh_result_ui()
+
     def on_fft_analysis(self):
         """Open the FFT analysis dialog on the currently displayed data."""
         if self.data_model is None or self.data_model.ptr < 2:
@@ -1092,9 +1095,6 @@ class RunningWindow(QWidget):
             for key in ("N", "Mean", "Variance", "Covariance", "y_bar_d")
         }
         self.refresh_result_ui()
-
-        if not plot_only:
-            self.refresh_result_ui()
 
     def apply_stylesheet(self):
         style = """
