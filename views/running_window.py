@@ -67,6 +67,7 @@ class RunningWindow(QWidget):
     recalculate_state_requested = pyqtSignal()
     save_data_requested = pyqtSignal(str)
     load_data_requested = pyqtSignal(str)
+    multi_analysis_requested = pyqtSignal()
 
     @property
     def is_running(self):
@@ -273,6 +274,21 @@ class RunningWindow(QWidget):
         """)
         self.edit_info_btn.clicked.connect(self.on_edit_info)
         info_layout.addWidget(self.edit_info_btn)
+
+        self.trend_btn = QPushButton("Trend…")
+        self.trend_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d; color: white; padding: 6px 12px;
+                border-radius: 4px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #5a6268; }
+        """)
+        self.trend_btn.setToolTip(
+            "Multi-measurement analysis: plot the workspace's saved measurements "
+            "and the current one together (custom formulas on both axes)"
+        )
+        self.trend_btn.clicked.connect(self.multi_analysis_requested.emit)
+        info_layout.addWidget(self.trend_btn)
 
         toolbar_layout.addWidget(self.start_bnt)
         toolbar_layout.addSpacing(10)

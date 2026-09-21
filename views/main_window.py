@@ -50,6 +50,16 @@ class View(QWidget):
         self.setup_view.change_to_running_window.connect(self.change_to_running_window)
         self.setup_view.load_data_requested.connect(self.load_data)
 
+        # One shared multi-analysis window for both entry points (the
+        # offline import page and the running window's Trend button)
+        self._multi_dialog = None
+        self.setup_view.import_data.multi_analysis_requested.connect(
+            lambda workspace: self.open_multi_analysis(workspace)
+        )
+        self.running_view.multi_analysis_requested.connect(
+            lambda: self.open_multi_analysis(focus_live=True)
+        )
+
         self.running_view.restart_signal.connect(self.restart_window)
 
         self.windows_stack.addWidget(self.setup_view)
@@ -103,6 +113,16 @@ class View(QWidget):
 
     def load_data(self, file_path: str):
         self.running_view.load_data_requested.emit(file_path)
+
+    def open_multi_analysis(self, workspace_dir=None, focus_live=False):
+        """Open (or raise) the shared multi-measurement analysis window."""
+        if self._multi_dialog is None:
+            from views.multi_analysis_dialog import MultiAnalysisDialog
+
+            self._multi_dialog = MultiAnalysisDialog(
+                self.session, self.data_model, self.hardware_manager, self
+            )
+        self._multi_dialog.open_with(workspace_dir, focus_live=focus_live)
 
     def closeEvent(self, a0) -> None:
         if self.windows_stack.currentIndex() == 1:  # running_window

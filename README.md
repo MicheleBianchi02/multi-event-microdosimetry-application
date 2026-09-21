@@ -36,7 +36,7 @@ hardware abstraction layer.
 | `models/` | Application state: `SessionModel` (configuration, metadata, signals) and `DataModel` (measurement arrays, online statistics) |
 | `views/` | PyQt6/pyqtgraph UI (wizard, running dashboard, offline import, workspace and calibration dialogs) |
 | `controllers/` | `SetupController` (wizard, connection, timing/gain configuration) and `MeasurementController` (measurement loop, save/load, results) |
-| `services/` | `HardwareService`, `DataExporter` (ZIP archives), `ShiftService` (workspace setup.json, crash recovery), `AnalysisService` (FFT, moving average, physics façade) |
+| `services/` | `HardwareService`, `DataExporter` (ZIP archives), `ShiftService` (workspace setup.json, crash recovery), `AnalysisService` (FFT, moving average, physics façade), multi-measurement analysis (`measurement_catalog` workspace scan, `variable_catalog`, `multi_analysis_service` pipeline) |
 | `core/` | Scientific algorithms: `calc_stat.py` (variance–covariance estimators + bootstrap), `bragg_peak.py` (FLUKA curves, integration-time planning), `load_file.py` (archive/legacy readers), `data_utils.py`, `constants.py` |
 | `hardware/` | Hardware abstraction: `interfaces/` (the abstract rules), `core/HardwareManager` (role routing), concrete drivers |
 
@@ -301,6 +301,30 @@ Four estimators are computed over the (ROI-filtered) data, each with uncertainti
 6. **Offline analysis.** "Analyze Offline Data" opens a workspace browser listing
    all measurement ZIPs with metadata filters, or a single ZIP/CSV can be loaded.
    ROIs stored in the archive are re-applied at load.
+   **Multi-Measurement Analysis** (button on the same page, or *Trend…* in the
+   running window) opens a non-modal window that plots every measurement of the
+   workspace together: custom formulas on both axes built from a searchable
+   catalogue of variables (per estimator and channel — each method lists only
+   the parameters it actually computes — plus metadata, timing, gain, `index`
+   and `timestamp`), combined with `+ - * / **` and parentheses; uncertainties
+   propagate to first order and render as error bars. A *units* box switches
+   the result variables between raw channels (counts) and charge (pC, converted
+   with each measurement's recorded capacitance/ADC range) — the picker shows
+   one variant at a time and switching rewrites the open formulas. Several Y
+   expressions can be plotted at once (one per line, one colour each) to
+   compare estimators; a record is plotted only where *every* expression is
+   valid, keeping the series comparable. Measurements are filtered (depth,
+   current, energy, detector voltage, integration time, ⚠ flag) and
+   individually (de)selected; a *colour-by* variable splits the points into
+   labelled series (e.g. one colour per integration time; disabled for
+   multi-Y, where colour encodes the expression). The current, possibly still
+   running measurement can be included as a distinct open-symbol point and
+   refreshed on demand, to catch anomalies during a shift. Formulas can be
+   saved as presets in the workspace (`analysis_presets.json`) and the computed
+   table exported to CSV. A new estimator appearing in the results dictionary
+   is picked up automatically; when raw-counts variables are plotted across
+   measurements with different gains/ADCs, the dialog suggests the charge-unit
+   variants.
 
 A simulation mode (`python app.py -s`, or the *Simulate* button) replaces the
 hardware with synthetic data for testing.
@@ -411,8 +435,12 @@ severities in [BUG.md](BUG.md)):
   setup UI: channel count is governed by the hardware config, and acquisition operates
   strictly in debug mode. Archives record `measurement_info.acquisition_mode = "debug"`.
   Old 3-column operational files remain supported by the offline loader.
-- **Multi file analysis**: the user can analyze multiple measurements at the same
-  time (e.g. create a graph of the yD against depth or beam current).
+- **Multi file analysis**: *done* — the multi-measurement analysis window
+  (§3.6) plots any archived quantity against any other with custom formulas on
+  both axes. Still open for later: more formula functions (`sqrt`, `log`, …),
+  unit-aware axis labels for combined formulas, calibrated (physical-unit)
+  variables once the calibration workflow is settled, and batch re-analysis
+  from raw `data.csv`.
 - **Oversampling**: ADC oversampling could be used to reduce noise.
 - **Concrete driver documentation**: *Pico done* — the PICO2DAQ 2.0
   protocol (commands, binary frame, pin map, limits, timing models) is
@@ -422,10 +450,6 @@ severities in [BUG.md](BUG.md)):
   should not be relied upon).
 - **FFT analysis uncertainties**: the `var_fft` estimator currently reports 0
   for its uncertainties; a bootstrap or propagation scheme is future work.
-- **Multi file analysis**: Analyze multiple measurement at the same time. 
-  Create multiple custom plot. The user can decide the X and Y axis with custom created 
-  formulae. Create a "calculator" where the user can insert the equations of various 
-  allowed parameters. 
 
 ## 7. Running and building
 

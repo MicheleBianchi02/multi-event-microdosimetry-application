@@ -1,6 +1,5 @@
 import json
 import os
-import zipfile
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -23,6 +22,7 @@ from PyQt6.QtWidgets import (
 
 class ImportDataWidget(QWidget):
     load_signal = pyqtSignal(str)
+    multi_analysis_requested = pyqtSignal(str)
 
     def __init__(self, session_model):
         super().__init__()
@@ -85,6 +85,28 @@ class ImportDataWidget(QWidget):
         self.btn_single.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_single.clicked.connect(self.on_load_single)
         btn_layout.addWidget(self.btn_single)
+
+        self.btn_multi = QPushButton(" Multi-Measurement Analysis")
+        icon_chart = self.style().standardIcon(
+            QStyle.StandardPixmap.SP_FileDialogDetailedView
+        )
+        self.btn_multi.setIcon(icon_chart)
+        self.btn_multi.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745; color: white;
+                font-size: 14pt; font-weight: bold; padding: 12px 25px; border-radius: 8px;
+            }
+            QPushButton:hover { background-color: #218838; }
+            QPushButton:disabled { background-color: #a8c9b0; }
+        """)
+        self.btn_multi.setToolTip(
+            "Plot any result quantity of every measurement in the workspace "
+            "against any other, with custom formulas on both axes"
+        )
+        self.btn_multi.setEnabled(False)
+        self.btn_multi.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_multi.clicked.connect(self.on_multi_analysis)
+        btn_layout.addWidget(self.btn_multi)
 
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
@@ -212,6 +234,10 @@ class ImportDataWidget(QWidget):
         self.workspace_dir = os.path.dirname(file_path)
         self.scan_workspace()
 
+    def on_multi_analysis(self):
+        if self.workspace_dir:
+            self.multi_analysis_requested.emit(self.workspace_dir)
+
     def display_workspace_info(self, setup_data):
         # Clear existing layout
         for i in reversed(range(self.workspace_info_layout.count())):
@@ -292,35 +318,14 @@ class ImportDataWidget(QWidget):
         if not self.workspace_dir or not os.path.isdir(self.workspace_dir):
             return
 
-        # Find all zip files in directory
-        zip_files = [f for f in os.listdir(self.workspace_dir) if f.endswith(".zip")]
+        # Shared scanner (also feeds the multi-measurement analysis);
+        # records come oldest-first, the cards show newest-first
+        from services.measurement_catalog import scan_workspace as scan_dir
 
-        measurements = []
-        for zf_name in zip_files:
-            zf_path = os.path.join(self.workspace_dir, zf_name)
-            try:
-                with zipfile.ZipFile(zf_path, "r") as z:
-                    if "settings.json" in z.namelist():
-                        with z.open("settings.json") as sf:
-                            settings = json.load(sf)
-                            measurements.append(
-                                {
-                                    "path": zf_path,
-                                    "filename": zf_name,
-                                    "settings": settings,
-                                }
-                            )
-            except Exception as e:
-                print(f"Failed to read {zf_name}: {e}")
-
-        # Sort by timestamp_start (descending)
-        def get_ts(m):
-            try:
-                return m["settings"]["measurement_info"]["timestamp_start"]
-            except KeyError:
-                return ""
-
-        measurements.sort(key=get_ts, reverse=True)
+        measurements = scan_dir(self.workspace_dir)
+        measurements.reverse()
+        self.measurements = measurements
+        self.btn_multi.setEnabled(True)
 
         if not measurements:
             no_data = QLabel("No .zip measurements found in this workspace.")
@@ -359,7 +364,7 @@ class ImportDataWidget(QWidget):
             # Extract unique values
             unique_values = set()
             for m in measurements:
-                exp = m["settings"].get("experimental_setup", {})
+                exp = m.settings.get("experimental_setup", {})
                 val = exp.get(dict_key, None)
                 if val is not None:
                     unique_values.add(str(val))
@@ -383,7 +388,7 @@ class ImportDataWidget(QWidget):
                 active_filters[dict_key] = current_text
 
         for card in self.card_widgets:
-            exp = card.m_data["settings"].get("experimental_setup", {})
+            exp = card.m_data.settings.get("experimental_setup", {})
             matches = True
             for dict_key, filter_val in active_filters.items():
                 card_val = str(exp.get(dict_key, ""))
@@ -410,7 +415,7 @@ class ImportDataWidget(QWidget):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(15, 15, 15, 15)
 
-        settings = m_data["settings"]
+        settings = m_data.settings
         info = settings.get("measurement_info", {})
         exp = settings.get("experimental_setup", {})
         timing = settings.get("timing_settings", {})
@@ -421,7 +426,7 @@ class ImportDataWidget(QWidget):
             dt = datetime.fromisoformat(ts_raw)
             ts_str = dt.strftime("%b %d, %Y - %H:%M:%S")
         except ValueError:
-            ts_str = ts_raw or m_data["filename"]
+            ts_str = ts_raw or m_data.filename
             
         if info.get("is_problematic", False):
             ts_str += " <span style='color: #e74c3c; font-size: 16pt;'>⚠</span>"
@@ -477,7 +482,7 @@ class ImportDataWidget(QWidget):
             }
             QPushButton:hover { background-color: #218838; }
         """)
-        load_btn.clicked.connect(lambda _, p=m_data["path"]: self.load_signal.emit(p))
+        load_btn.clicked.connect(lambda _, p=m_data.path: self.load_signal.emit(p))
         layout.addWidget(load_btn)
 
         return card
