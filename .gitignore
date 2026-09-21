@@ -21,8 +21,5 @@ dist/
 *.swp
 .DS_Store
 
-# ZCode session artifacts
-.zcode/
-
 # Pico firmware working copy (lives in its own repository; local only)
 raspberry_copy/
