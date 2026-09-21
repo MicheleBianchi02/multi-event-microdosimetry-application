@@ -1,0 +1,132 @@
+{
+    "schema_version": "1.0",
+    "devices": {
+        "dummy_acq": {
+            "name": "Virtual acquisition",
+            "driver": "dummy_v1",
+            "connection": {
+                "type": "dummy"
+            },
+            "note": "Virtual device for testing the timing and gain interfaces: all commands succeed, start succeeds, but no data is collected.",
+            "capabilities": {
+                "acquisition": {
+                    "num_channels": 2,
+                    "adc": {
+                        "bits": 12,
+                        "input_ranges_volts": [
+                            {
+                                "min_volts": 0.0,
+                                "max_volts": 5.0
+                            }
+                        ],
+                        "supports_oversampling": false
+                    }
+                }
+            }
+        },
+        "pico_1": {
+            "name": "Pico 2",
+            "driver": "pico_serial_v1",
+            "firmware_version": "2.0",
+            "connection": {
+                "type": "serial",
+                "baud_rate": 115200
+            },
+            "note": "Firmware PICO2DAQ 2.0. Pin map (GPIO, not pad position): GP14 integrator reset, GP15 ramp trigger, GP16 event mode, GP17-19 capacitor bits 0-2, GP26 ADC input (0-3.3 V, no front-end scaler). No port to fill in: the app opens /dev/atomiqa/<device id>, created by the udev rule.",
+            "capabilities": {
+                "timing": {
+                    "integration_time_us": {
+                        "min": 5,
+                        "max": 10000000,
+                        "step": 1
+                    },
+                    "reset_time_us": {
+                        "min": 10,
+                        "max": 10000000,
+                        "step": 1
+                    },
+                    "period_us": null,
+                    "ramp_sampling": {
+                        "supported": true,
+                        "dt_us": {
+                            "min": 10,
+                            "max": 4360,
+                            "step": 10
+                        }
+                    }
+                },
+                "gain": {
+                    "pins": [
+                        17,
+                        18,
+                        19
+                    ]
+                },
+                "acquisition": {
+                    "num_channels": 1,
+                    "adc": {
+                        "bits": 12,
+                        "input_ranges_volts": [
+                            {
+                                "min_volts": 0.0,
+                                "max_volts": 3.3
+                            }
+                        ],
+                        "supports_oversampling": false
+                    }
+                }
+            }
+        }
+    },
+    "circuits": {
+        "circuit": {
+            "name": "New circuit",
+            "fixed_capacitance_pF": 22.0,
+            "switchable_capacitors": [
+                {
+                    "id": "c100",
+                    "value_pF": 100.0
+                },
+                {
+                    "id": "c200",
+                    "value_pF": 560.0
+                },
+                {
+                    "id": "c300",
+                    "value_pF": 3300.0
+                }
+            ]
+        }
+    },
+    "channels": {
+        "ch1": {
+            "circuit": "circuit"
+        }
+    },
+    "roles": {
+        "timing": "pico_1",
+        "acquisition": "dummy_acq",
+        "gain_ch1": "pico_1",
+        "gain_ch2": null
+    },
+    "connections": [
+        {
+            "device": "pico_1",
+            "pin": 17,
+            "circuit": "circuit",
+            "capacitor": "c100"
+        },
+        {
+            "device": "pico_1",
+            "pin": 18,
+            "circuit": "circuit",
+            "capacitor": "c200"
+        },
+        {
+            "device": "pico_1",
+            "pin": 19,
+            "circuit": "circuit",
+            "capacitor": "c300"
+        }
+    ]
+}
