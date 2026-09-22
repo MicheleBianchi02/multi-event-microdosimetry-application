@@ -795,7 +795,7 @@ class RunningWindow(QWidget):
 
         self.fft_control_layout.addWidget(QLabel("Downsample:"))
         self.fft_downsample_box = QComboBox()
-        self.fft_downsample_box.addItems(["Mean Pooling", "Max Pooling"])
+        self.fft_downsample_box.addItems(["Mean", "Max"])
         self.fft_control_layout.addWidget(self.fft_downsample_box)
 
         self.fft_control_layout.addWidget(QLabel("Reference Function:"))
