@@ -1,0 +1,3 @@
+[submodule "docs/NI/nidaqmx-python"]
+	path = docs/NI/nidaqmx-python
+	url = https://github.com/ni/nidaqmx-python

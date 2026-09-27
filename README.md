@@ -3,6 +3,24 @@
 Data acquisition and analysis application for microdosimetry measurements with the
 variance–covariance method, applied to proton and carbon ion therapy beams.
 
+## Documentation
+
+- [HARDWARE_CONFIG.md](HARDWARE_CONFIG.md) — the hardware configuration file (structure,
+  editor, workflow) and the output-file reference.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the application's architecture: MVC
+  layering, backend (models, services, core, hardware abstraction) in detail, concurrency
+  model, data-flow walkthroughs.
+- [docs/PICO/](docs/PICO/) — Pico 2 DAQ (PICO2DAQ): serial-protocol and pin-map reference
+  ([README.md](docs/PICO/README.md)), firmware internals + the `pico_serial_v1` driver
+  ([FIRMWARE_AND_DRIVER.md](docs/PICO/FIRMWARE_AND_DRIVER.md)), firmware sources and
+  datasheets.
+- [docs/PIC/](docs/PIC/) — PIC18F8723: serial-protocol and pin-map reference
+  ([README.md](docs/PIC/README.md)), firmware internals + the `pic_serial_v1` driver
+  ([FIRMWARE_AND_DRIVER.md](docs/PIC/FIRMWARE_AND_DRIVER.md)), firmware sources,
+  datasheets and the (older) code review.
+- [docs/NI/DRIVER.md](docs/NI/DRIVER.md) — NI USB-6451: how the simultaneous-sampling
+  digitizer works and the `ni_daqmx_v1` driver in detail.
+
 ## 1. Overview
 
 ATOMIQA drives the readout chain of a current-mode integrator, collects the charge
@@ -210,17 +228,22 @@ disabled with an explanatory tooltip.
 > against a fake `nidaqmx` module; live validation needs the DAQmx runtime
 > and the card).
 
-> The Pico driver (`pico_serial_v1`) implements the **PICO2DAQ 2.0**
+> The Pico driver (`pico_serial_v1`) implements the **PICO2DAQ 2.1**
 > firmware protocol, documented in
 > [raspberry_copy/README.md](raspberry_copy/README.md) (commands, replies,
-> binary frame, end-of-stream marker, pin map, validated limits). Its
-> `connect()` runs the `V` identity handshake as a liveness check (wrong
+> binary frame, end-of-stream marker, pin map, validated limits) — the same
+> reference lives in [docs/PICO/README.md](docs/PICO/README.md), next to the
+> firmware sources; the firmware internals and the driver are described in
+> depth in [docs/PICO/FIRMWARE_AND_DRIVER.md](docs/PICO/FIRMWARE_AND_DRIVER.md).
+> Its `connect()` runs the `V` identity handshake as a liveness check (wrong
 > firmware or a system clock other than 150 MHz refuses the connection),
 > and its `calculate_actual_timing` mirrors the firmware's truncation of
 > the times to whole 150 MHz cycles. The PIC implementation still speaks
-> the legacy protocol. `microcontroller_api.md` and `daq_architecture.txt`
-> in this folder describe outdated protocols and folder layouts and should
-> not be relied upon.
+> the legacy protocol; its firmware and driver are now documented in
+> [docs/PIC/README.md](docs/PIC/README.md) and
+> [docs/PIC/FIRMWARE_AND_DRIVER.md](docs/PIC/FIRMWARE_AND_DRIVER.md).
+> `microcontroller_api.md` and `daq_architecture.txt` in this folder describe
+> outdated protocols and folder layouts and should not be relied upon.
 
 ### 2.2 Models, concurrency and performance
 
@@ -504,7 +527,7 @@ severities in [BUG.md](BUG.md)):
   tested, and the NI driver streams into the sink (see above). Still open:
   validation with real hardware, and the monitoring/FFT UI reading the files
   via `np.memmap`.
-- **Device identity check**: *liveness done* — the PICO2DAQ 2.0 firmware's
+- **Device identity check**: *liveness done* — the PICO2DAQ 2.1 firmware's
   `V` handshake returns a unique per-board id and the driver verifies
   firmware + clock on every connect (wrong board or bare Pico refuses the
   connection). Still open: matching the board id against the hardware
@@ -522,12 +545,13 @@ severities in [BUG.md](BUG.md)):
   variables once the calibration workflow is settled, and batch re-analysis
   from raw `data.csv`.
 - **Oversampling**: ADC oversampling could be used to reduce noise.
-- **Concrete driver documentation**: *Pico done* — the PICO2DAQ 2.0
-  protocol (commands, binary frame, pin map, limits, timing models) is
-  documented in `raspberry_copy/README.md` and mirrored by the driver.
-  Still open: the PIC, which still speaks the legacy protocol
-  (`microcontroller_api.md` / `daq_architecture.txt` are outdated and
-  should not be relied upon).
+- **Concrete driver documentation**: *done* — the PICO2DAQ protocol
+  (commands, binary frame, pin map, limits, timing models) is documented in
+  `raspberry_copy/README.md` (= [docs/PICO/README.md](docs/PICO/README.md))
+  and mirrored by the driver; both µC firmwares and all three drivers are
+  described in depth under [docs/](docs/) (PICO, PIC, NI). The PIC still
+  speaks the legacy protocol; `microcontroller_api.md` /
+  `daq_architecture.txt` are outdated and should not be relied upon.
 - **FFT analysis uncertainties**: the `var_fft` estimator currently reports 0
   for its uncertainties; a bootstrap or propagation scheme is future work.
 
