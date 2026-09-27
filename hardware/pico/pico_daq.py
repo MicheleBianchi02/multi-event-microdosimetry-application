@@ -101,9 +101,6 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
         reset_time_us=ParameterBounds(5, 10_000_000, 1),
         period_us=None,  # derived by the firmware: period = int + reset
         ramp_sampling=RampSamplingConfig(
-            # the software generator's ultimate bound; the firmware-version
-            # gate (_validate_ramp_dt_us) enforces the tighter deployed-
-            # firmware cap at runtime
             True, dt_us=ParameterBounds(1, RAMP_DT_MAX_US, 1)
         ),
     )
