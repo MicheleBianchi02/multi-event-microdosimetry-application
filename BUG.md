@@ -107,7 +107,7 @@ Severity scale:
   tests hid it (fake reader and simulator emit window-aligned whole blocks
   starting at index 0).
 - **Fixed (2026-09-27):** arm the clock consumer before the clock producer.
-  `NIDAQmxAquisition.start_measurement` now starts the task *before*
+  `NIDAQmxAcquisition.start_measurement` now starts the task *before*
   returning (verified: the regression test checks the task is armed at the
   moment the timing 'S' is sent, and fails on the old ordering);
   `start_receiving` arms the acquisition first and starts the timing second,
@@ -216,6 +216,81 @@ Severity scale:
   `tests/test_timing_routing.py`
   (`test_preview_rejection_is_raised_not_swallowed`).
 
+### B30 — The B27 stop-drain was ineffective against the real nidaqmx wrapper — **FIXED** *(reported 2026-09-27)*
+- **Intended:** `stop_measurement`'s drain empties the DAQmx buffer into
+  the sink before `task.stop()` discards it (B27).
+- **Current (as found):** the drain called
+  `read_many_sample(buffer, READ_ALL_AVAILABLE, timeout=0.1)` with the
+  fixed (chans, block) buffer. On the real wrapper, READ_ALL resolves —
+  via `_calculate_num_samps_per_chan` — to `in_stream.avail_samp_per_chan`,
+  and `_verify_array` (shape verification ON by default) then demands
+  `buffer.shape == (chans, avail)` EXACTLY: any avail != block raises
+  `DaqError`, which the drain's `except Exception: break` swallowed —
+  nothing was drained, `task.stop()` discarded the tail. The fake
+  implemented min(avail, buffer) semantics and skipped verification, so
+  its test could not catch this.
+- **Fixed (2026-09-27):** the reader is created with
+  `verify_array_shape = False` and reads explicit counts
+  `n = min(in_stream.avail_samp_per_chan, block)` in a loop (main loop
+  and drain) — READ_ALL_AVAILABLE is never requested into a fixed buffer.
+  The fake reader now mirrors the real wrapper's contract (READ_ALL
+  resolution, exact-shape verification, partial-transfer semantics), so
+  the old pattern fails the tests. Regression tests: `tests/test_ni_driver.py`
+  (`test_never_reads_all_available_and_disables_shape_verification`,
+  `test_stop_drains_the_buffered_tail_before_task_stop`).
+
+### B31 — A partial read timeout silently shifted the window grid — **FIXED** *(reported 2026-09-27)*
+- **Intended:** every sample DAQmx transfers reaches the sink with a
+  contiguous index — a lost batch must be recorded as a gap, never
+  absorbed silently.
+- **Current (as found):** on a read timeout with partial data (transport
+  hiccup mid-run), DAQmx has already removed the transferred samples from
+  its buffer and written them into the caller's array, raising
+  `DaqReadError` with the count. The driver matched only the error code
+  and `continue`d: the partial samples were discarded, the counters did
+  not advance, and the next block was delivered under the old contiguous
+  index — no gap recorded, every subsequent window misaligned (the B24
+  failure mode reintroduced). The pre-'S' wait was benign (partial = 0).
+- **Fixed (2026-09-27):** timeouts are handled in one place
+  (`read_count`): a partial count is delivered from the buffer and the
+  counters advance before the wait continues. With B30's avail-based
+  reads, mid-run partial timeouts are structurally impossible (the
+  requested samples are already in the buffer when the read is issued);
+  the delivery path is the defensive net. Regression test:
+  `tests/test_ni_driver.py`
+  (`test_partial_timeout_delivers_transferred_samples`).
+
+### B32 — Stop order undercut the drain (stale comment after B24) — **FIXED** *(reported 2026-09-27)*
+- **Intended:** stop mirrors the B24 start order: timing engine first
+  ('E' — the Pico finishes its current cycle, the edge train ends), then
+  the acquisition (drain a static buffer, then task.stop()).
+- **Current (as found):** `HardwareService.stop_receiving` still stopped
+  the acquisition before the timing — its "Symmetric to the start"
+  comment was stale after B24 inverted the start. During the drain the
+  Pico kept producing edges: the drain never emptied, the 6 s join
+  expired, `task.stop()` killed the reader and discarded the residual
+  buffer — and with B30 fixed, every stop would have taken ~6 s.
+- **Fixed (2026-09-27):** `stop_timing_signal()` runs first, then
+  `acquisition.stop_measurement()`. Regression test: `tests/test_ni_driver.py`
+  (`test_stop_stops_timing_before_the_acquisition`).
+
+### B33 — The timing window's rejection reason was written to a hidden label — **FIXED** *(reported 2026-09-27)*
+- **Intended:** the B28 preview-rejection reason is visible while the
+  user edits, and apply-time rejections show it too.
+- **Current (as found):** `on_configuration_result(False, msg)` wrote the
+  reason into the status frame, which stays invisible until the first
+  Apply press (`setVisible(True)` only in `on_send_press`) — during
+  editing the reason went to a hidden label; and the Apply-time failure
+  passed no message, showing the generic text.
+- **Fixed (2026-09-27):** the failure branch of `on_configuration_result`
+  makes the frame visible; `HardwareManager.configure_timing` validates
+  through the driver's mirror BEFORE touching hardware and raises
+  `ValueError` with the reason, which `SetupController` threads into
+  `on_configuration_result(False, reason)`. Regression tests:
+  `tests/test_ni_driver.py`
+  (`test_configure_timing_raises_the_mirror_reason`,
+  `test_time_window_failure_branch_makes_the_status_frame_visible`).
+
 ---
 
 ## LOW
@@ -268,7 +343,7 @@ Severity scale:
   the never-connected handler and the `if False:` block (or re-enable the
   ZIP auto-update deliberately), drop the duplicate calls.
 
-### B24 — `data.csv` timestamps start at one sample period instead of zero *(reported 2026-09-27)*
+### B29 — `data.csv` timestamps start at one sample period instead of zero *(reported 2026-09-27; renumbered from a duplicate B24)*
 - **Intended:** the `timestamp` column holds "sample index divided by the
   sample frequency" (README §4.2) — the first sample of the measurement is
   t = 0.

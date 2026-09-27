@@ -761,6 +761,10 @@ class TimeWindow(QWidget):
             self.toggle_ui_lock(locked=True)
             logger.debug("Parameters sent to the DAQ device.")
         else:
+            # visible immediately: the timing preview reports rejections
+            # here while the user is still editing (the frame used to stay
+            # hidden until the first Apply press, hiding the reason)
+            self.status_frame.setVisible(True)
             self.status_frame.setStyleSheet(
                 "background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 5px;"
             )

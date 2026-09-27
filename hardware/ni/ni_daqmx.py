@@ -65,7 +65,7 @@ MAX_READ_TIMEOUT_S = 2.0
 READ_TIMEOUT_CODE = -200284
 
 
-class NIDAQmxAquisition(IDataAcquisition):
+class NIDAQmxAcquisition(IDataAcquisition):
     """Acquisition role on a NI USB-6451 (DAQmx device, USB transport)."""
 
     DRIVER_CAPABILITIES = {"acquisition"}
@@ -291,6 +291,12 @@ class NIDAQmxAquisition(IDataAcquisition):
 
         self._task = task
         self._reader = AnalogMultiChannelReader(task.in_stream)
+        # Explicit-count reads into the oversized buffer (n = min(avail,
+        # block) <= buffer width, guaranteed by construction): the
+        # wrapper's array verification demands an EXACT (chans, count)
+        # shape — which a fixed buffer violates for every count != block,
+        # READ_ALL included (it resolves to avail) — so it is disabled.
+        self._reader.verify_array_shape = False
         self._stop_event.clear()
         self._error = False
         self._samples_read = 0
@@ -359,10 +365,10 @@ class NIDAQmxAquisition(IDataAcquisition):
 
         channel_indices = [0 if ch == "ch1" else 1 for ch, _ in self._channel_plan]
         counters = [0] * len(self._channel_plan)
-        timeout = self._read_timeout_s(block, expected_rate)
+        wait_timeout = self._read_timeout_s(1, expected_rate)
 
-        def deliver(read):
-            view = buffer[:, :read]
+        def deliver(count):
+            view = buffer[:, :count]
             # zero-based counts over the applied bipolar range; NI clamps
             # out-of-range readings, so railing at full scale *is* the
             # overflow indication
@@ -371,50 +377,62 @@ class NIDAQmxAquisition(IDataAcquisition):
             counts = scaled.astype(np.uint32)
             for row, ch_index in enumerate(channel_indices):
                 ramp_sink.write_block(ch_index, counts[row], counters[row])
-                counters[row] += read
-            self._samples_read += read
+                counters[row] += count
+            self._samples_read += count
 
+        def read_count(n, timeout):
+            """Read exactly n samples and deliver them to the sink.
+            Returns the number of samples delivered.  On a read timeout,
+            the samples DAQmx already transferred (and removed from its
+            buffer) are delivered — dropping them would silently shift
+            the window grid, because the sink counters would not advance
+            (B31)."""
+            try:
+                read = self._reader.read_many_sample(buffer, n, timeout=timeout)
+            except Exception as exc:
+                if getattr(exc, "error_code", None) != READ_TIMEOUT_CODE:
+                    raise
+                read = int(getattr(exc, "samps_per_chan_read", 0) or 0)
+            if read > 0:
+                deliver(read)
+            return read
+
+        in_stream = self._task.in_stream
         try:
             while not self._stop_event.is_set():
-                try:
-                    read = self._reader.read_many_sample(
-                        buffer, block, timeout=timeout
-                    )
-                except Exception as exc:
-                    # The task is armed but the timing engine has not been
-                    # started yet (or sits between windows): a read timeout
-                    # is the normal "no CONV_START edges so far" state —
-                    # keep waiting as long as the measurement runs.  A stop
-                    # landing mid-wait must BREAK to the drain below, not
-                    # skip it (re-raising here would leave the buffered
-                    # tail undelivered).
-                    if getattr(exc, "error_code", None) == READ_TIMEOUT_CODE:
-                        if self._stop_event.is_set():
-                            break
-                        continue
-                    raise
-                if read > 0:
-                    deliver(read)
+                avail = in_stream.avail_samp_per_chan
+                if avail <= 0:
+                    # Armed but no CONV_START edges yet: block on one
+                    # sample (this read is the no-edges watchdog; its
+                    # timeout transfers nothing).
+                    read_count(1, wait_timeout)
+                    continue
+                # Explicit count — never READ_ALL_AVAILABLE: the wrapper
+                # resolves it to avail_samp_per_chan and its array check
+                # demands the buffer be shaped (chans, avail) EXACTLY,
+                # which the fixed oversized buffer never is (B30).  With
+                # n = min(avail, block) the samples are already in the
+                # buffer, so the read returns completely.
+                read_count(min(avail, block), MAX_READ_TIMEOUT_S)
 
-            # Final drain: everything the DAQmx buffer still holds must be
-            # pushed BEFORE stop_measurement calls task.stop(), which
-            # discards unread samples — in markers mode those are
-            # measurement rows, not monitoring data.
-            from nidaqmx.constants import READ_ALL_AVAILABLE
-
+            # Final drain (the timing engine is stopped FIRST by
+            # stop_receiving, so the buffer is static): everything DAQmx
+            # still holds must reach the sink BEFORE stop_measurement
+            # calls task.stop(), which discards unread samples — in
+            # markers mode those are measurement rows, not monitoring
+            # data.
             while True:
                 try:
-                    read = self._reader.read_many_sample(
-                        buffer, READ_ALL_AVAILABLE, timeout=0.1
-                    )
+                    avail = in_stream.avail_samp_per_chan
                 except Exception:
                     break
-                if read <= 0:
+                if avail <= 0:
                     break
-                deliver(read)
+                if read_count(min(avail, block), 0.1) <= 0:
+                    break
         except Exception:
             # Anything escaping the loop above is fatal for the stream —
-            # surface it and stop (timeouts already handled above).
+            # surface it and stop (timeouts are handled in read_count).
             if not self._stop_event.is_set():
                 logger.exception("DAQmx read failed after %d samples", self._samples_read)
                 self._error = True

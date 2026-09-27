@@ -2,7 +2,7 @@
     "schema_version": "1.0",
     "devices": {
         "pico_1": {
-            "name": "Pico 2 — all roles",
+            "name": "Pico 2 \u2014 all roles",
             "driver": "pico_serial_v1",
             "firmware_version": "2.0",
             "connection": {
@@ -27,7 +27,7 @@
                         "supported": true,
                         "dt_us": {
                             "min": 1,
-                            "max": 4360,
+                            "max": 10000000,
                             "step": 1
                         }
                     }
@@ -58,7 +58,7 @@
     },
     "circuits": {
         "board_ch1": {
-            "name": "Integrator board — detector 1",
+            "name": "Integrator board \u2014 detector 1",
             "model": "ATOMIQA integrator rev. B",
             "fixed_capacitance_pF": 22.0,
             "switchable_capacitors": [
@@ -78,7 +78,7 @@
             "note": "S/N 004, connector J3."
         },
         "board_ch2": {
-            "name": "Integrator board — detector 2",
+            "name": "Integrator board \u2014 detector 2",
             "model": "ATOMIQA integrator rev. B",
             "fixed_capacitance_pF": 0.0,
             "switchable_capacitors": [

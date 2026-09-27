@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hardware.ni.ni_daqmx import NIDAQmxAquisition  # noqa: E402
+from hardware.ni.ni_daqmx import NIDAQmxAcquisition  # noqa: E402
 
 
 # ----------------------------------------------------------- fake nidaqmx
@@ -72,33 +72,65 @@ class FakeTask:
     def close(self):
         self.closed = True
 
+    @property
+    def avail_samp_per_chan(self):
+        return FakeReader._available()
 
-class FakeReadTimeout(Exception):
-    """DAQmx read timeout (error -200284): armed, but no CONV_START edges."""
 
-    error_code = -200284
+class FakeDaqError(Exception):
+    """Mirrors nidaqmx.DaqError: carries the DAQmx error code."""
+
+    def __init__(self, message, error_code, task_name=""):
+        super().__init__(message)
+        self.error_code = error_code
+
+
+class FakeDaqReadError(FakeDaqError):
+    """Mirrors nidaqmx.DaqReadError: a read error (timeouts included)
+    that carries the number of samples already transferred into the
+    caller's buffer (and removed from the device buffer)."""
+
+    def __init__(self, message, error_code, samps_per_chan_read):
+        super().__init__(message, error_code)
+        self.samps_per_chan_read = samps_per_chan_read
+
+
+READ_TIMEOUT_CODE = -200284
 
 
 class FakeReader:
-    """Stream-accurate fake of AnalogMultiChannelReader: `script` entries
-    (an exception to raise, or a (nchannels, nsamples) volts array) move
-    into an internal FIFO; fixed-count reads assemble exactly the requested
-    columns (leftovers stay buffered, like the real driver buffer), wait up
-    to `timeout` for data and raise FakeReadTimeout at the deadline;
-    READ_ALL_AVAILABLE (-1) drains whatever is buffered without waiting."""
+    """Mirrors the REAL AnalogMultiChannelReader contract (nidaqmx 1.6.0):
+    READ_ALL_AVAILABLE resolves to avail_samp_per_chan and — with
+    verify_array_shape True, the default — the array is verified to be
+    shaped (num_chans, count) EXACTLY; explicit-count reads wait up to
+    `timeout` and on expiry raise DaqReadError carrying the partial count,
+    with the transferred samples already written into the caller's array.
+    `script` entries are exception instances (raised on pull) or
+    (nchannels, nsamples) volts arrays moved into the buffer."""
 
     READ_ALL = -1  # nidaqmx.constants.READ_ALL_AVAILABLE
     script = []
     _buffered = []
     _lock = threading.Lock()
+    requested_counts = []  # every count the driver asked to read
 
     def __init__(self, task_in_stream):
         self._task = task_in_stream
+        self._verify_array_shape = True
+
+    @property
+    def verify_array_shape(self):
+        return self._verify_array_shape
+
+    @verify_array_shape.setter
+    def verify_array_shape(self, val):
+        self._verify_array_shape = val
 
     @classmethod
     def reset(cls):
         cls.script = []
         cls._buffered = []
+        cls.requested_counts = []
 
     @classmethod
     def _pull_script(cls):
@@ -112,6 +144,15 @@ class FakeReader:
     @classmethod
     def _available(cls):
         return sum(entry.shape[1] for entry in cls._buffered)
+
+    def _verify_array(self, data, count):
+        if not self._verify_array_shape:
+            return
+        required = (data.shape[0], count)
+        if data.shape != required:
+            raise FakeDaqError(
+                f"array shaped {data.shape}, required {required}", -200279
+            )
 
     def _assemble(self, data, want):
         out = np.empty((data.shape[0], want), dtype=float)
@@ -131,26 +172,46 @@ class FakeReader:
         return want
 
     def read_many_sample(self, data, number_of_samples_per_channel, timeout=10.0):
-        if number_of_samples_per_channel == self.READ_ALL:
-            # like the real device: once the task stopped, the unread
-            # buffer is discarded — the drain must happen before it
-            if self._task.stopped:
-                return 0
-            self._pull_script()
-            if not self._buffered:
-                return 0
-            return self._assemble(data, min(self._available(), data.shape[1]))
+        FakeReader.requested_counts.append(number_of_samples_per_channel)
+        try:
+            return self._read_impl(data, number_of_samples_per_channel, timeout)
+        except FakeDaqReadError as exc:
+            partial = exc.samps_per_chan_read
+            if partial:
+                # the real DAQmx call transfers the samples into the
+                # caller's array before returning the error
+                data[:, :partial] = -5.0
+            raise
 
-        want = number_of_samples_per_channel
+    def _read_impl(self, data, number_of_samples_per_channel, timeout=10.0):
+        count = number_of_samples_per_channel
+        if count == self.READ_ALL:
+            # the real wrapper resolves READ_ALL to avail_samp_per_chan
+            # (continuous task) BEFORE verifying the array shape
+            self._pull_script()
+            count = self._available()
+        self._verify_array(data, count)
+
         deadline = time.monotonic() + (timeout if timeout is not None else 10.0)
         while True:
             self._pull_script()
-            if self._task.stopped:
-                raise RuntimeError("task stopped")
-            if self._available() >= want:
-                return self._assemble(data, want)
+            if self._available() >= count:
+                return self._assemble(data, count)
+            partial = min(self._available(), count)
             if time.monotonic() >= deadline:
-                raise FakeReadTimeout("samples not yet available")
+                # real behaviour: the samples read before the timeout are
+                # transferred into the array AND removed from the device
+                # buffer, then the error carries their count
+                if partial:
+                    self._assemble(data, partial)
+                raise FakeDaqReadError(
+                    "samples not yet available", READ_TIMEOUT_CODE, partial
+                )
+            if self._task.stopped:
+                # DAQmxStopTask aborts a blocked read
+                if partial:
+                    self._assemble(data, partial)
+                raise FakeDaqReadError("task stopped", READ_TIMEOUT_CODE, partial)
             time.sleep(0.001)
 
 
@@ -273,9 +334,27 @@ class StubSink:
     def report_gap(self, channel, abs_index, missing):
         self.gaps.append((channel, abs_index, missing))
 
+    def received(self, channel):
+        """Concatenated samples of one channel, asserting the per-channel
+        absolute indices are contiguous from 0 (the sink contract the
+        window extractor's alignment depends on).  Block boundaries are
+        arbitrary — the driver splits wherever its reads happen to fall."""
+        pieces = []
+        expected_index = 0
+        for ch, samples, idx in self.blocks:
+            if ch != channel:
+                continue
+            assert idx == expected_index, (idx, expected_index)
+            pieces.append(samples)
+            expected_index += len(samples)
+        return np.concatenate(pieces) if pieces else np.array([], dtype=np.uint32)
+
+    def total(self, channel):
+        return len(self.received(channel))
+
 
 def make_driver(connected=True, plan=(("ch1", "differential"), ("ch2", "differential"))):
-    driver = NIDAQmxAquisition(device_name="NI6451")
+    driver = NIDAQmxAcquisition(device_name="NI6451")
     driver._connected = connected
     if plan:
         assert driver.configure_channels(list(plan))
@@ -309,23 +388,23 @@ def test_factory_requires_daqmx_connection():
     with pytest.raises(ValueError):
         registered.create({"type": "serial"}, None)
     driver = registered.create({"type": "daqmx", "device": "NI6451"}, None)
-    assert isinstance(driver, NIDAQmxAquisition)
+    assert isinstance(driver, NIDAQmxAcquisition)
 
 
 def test_connect_missing_package(monkeypatch):
     monkeypatch.setitem(sys.modules, "nidaqmx", None)  # import -> ImportError
-    driver = NIDAQmxAquisition(device_name="NI6451")
+    driver = NIDAQmxAcquisition(device_name="NI6451")
     assert driver.connect() is False
 
 
 def test_connect_unknown_device(fake_nidaqmx):
     FakeSystem.devices = [FakeDevice("something_else")]
-    driver = NIDAQmxAquisition(device_name="NI6451")
+    driver = NIDAQmxAcquisition(device_name="NI6451")
     assert driver.connect() is False
 
 
 def test_connect_ok(fake_nidaqmx):
-    driver = NIDAQmxAquisition(device_name="NI6451")
+    driver = NIDAQmxAcquisition(device_name="NI6451")
     assert driver.connect() is True
     assert driver.is_connected
     assert driver._product_type == "USB-6451"
@@ -334,7 +413,7 @@ def test_connect_ok(fake_nidaqmx):
 # --------------------------------------------------------- configuration
 
 def test_configure_channels_maps_fixed_terminals():
-    driver = NIDAQmxAquisition()
+    driver = NIDAQmxAcquisition()
     assert driver.configure_channels([("ch1", "differential"), ("ch2", "differential")])
     assert driver._channel_plan == [("ch1", "differential"), ("ch2", "differential")]
     assert driver.configure_channels([("ch1", "rse"), ("ch2", "rse")])
@@ -345,7 +424,7 @@ def test_configure_channels_maps_fixed_terminals():
 
 
 def test_set_input_range_accepts_only_device_ranges():
-    driver = NIDAQmxAquisition()
+    driver = NIDAQmxAcquisition()
     assert driver.set_input_range(-5.0, 5.0)
     assert driver.set_input_range(-0.2, 0.2)
     assert not driver.set_input_range(-7.0, 7.0)
@@ -360,7 +439,7 @@ def test_start_refuses_without_sink_or_plan():
     driver = make_driver()
     assert not driver.start_measurement(make_session(), None, ramp_sink=None)
 
-    driver_no_plan = NIDAQmxAquisition(device_name="NI6451")
+    driver_no_plan = NIDAQmxAcquisition(device_name="NI6451")
     driver_no_plan._connected = True
     sink = StubSink()
     assert not driver_no_plan.start_measurement(make_session(), None, ramp_sink=sink)
@@ -411,14 +490,18 @@ def test_read_timeout_tolerated_while_waiting_for_edges(fake_nidaqmx):
     block = driver._block_size(1e6)
 
     FakeReader.script = [
-        FakeReadTimeout("no edges yet"),
-        FakeReadTimeout("still no edges"),
+        FakeDaqReadError("no edges yet", READ_TIMEOUT_CODE, 0),
+        FakeDaqReadError("still no edges", READ_TIMEOUT_CODE, 0),
         np.stack([np.full(block, 0.0), np.full(block, 0.0)]),
     ]
     assert driver.start_measurement(make_session(), None, ramp_sink=sink)
-    assert _wait_for(lambda: len(sink.blocks) == 2)
+    assert _wait_for(lambda: sink.total(0) == block)
     assert driver.stop_measurement() is True  # timeouts were not an error
     assert driver._error is False
+    # everything scripted was delivered contiguously to both channels
+    # (0.0 V over [-5, +5] maps to mid-scale 524288)
+    assert sink.total(0) == block and sink.total(1) == block
+    assert (sink.received(0) == 524288).all()
 
 
 def test_reader_streams_converted_counts_with_indices(fake_nidaqmx):
@@ -429,28 +512,90 @@ def test_reader_streams_converted_counts_with_indices(fake_nidaqmx):
     block = driver._block_size(1e6)
     # volts chosen to map to exact counts over [-5, +5] at 20 bit:
     #   +5.0 V -> 1048575, 0.0 V -> 524288, -5.0 V -> 0, +10 V (overrange) -> clamp 1048575
-    def row(v):
-        return np.full(block, v, dtype=np.float64)
+    def row(v, n=None):
+        return np.full(block if n is None else n, v, dtype=np.float64)
 
+    # 20000 + 20000 samples: block boundaries in the sink are wherever the
+    # driver's reads fall; only the aggregated stream is contractually exact
     FakeReader.script = [
         np.stack([row(5.0), row(0.0)]),
         np.stack([row(-5.0), row(10.0)]),   # ch2 overrange -> clamps
     ]
     assert driver.start_measurement(make_session(), None, ramp_sink=sink)
-    assert _wait_for(lambda: len(sink.blocks) == 4)
+    assert _wait_for(lambda: sink.total(0) == 2 * block)
     driver.stop_measurement()
 
-    assert len(sink.blocks) == 4
-    ch, counts0, idx0 = sink.blocks[0]
-    assert ch == 0 and idx0 == 0 and counts0[0] == 1048575
-    ch, counts1, idx1 = sink.blocks[1]
-    assert ch == 1 and idx1 == 0 and counts1[0] == 524288
-    ch, counts2, idx2 = sink.blocks[2]
-    assert ch == 0 and idx2 == block and counts2[0] == 0
-    ch, counts3, idx3 = sink.blocks[3]
-    assert ch == 1 and idx3 == block and counts3[0] == 1048575  # clamped
+    ch1 = sink.received(0)
+    ch2 = sink.received(1)
+    assert len(ch1) == 2 * block and len(ch2) == 2 * block
+    assert (ch1[:block] == 1048575).all()          # +5 V full scale
+    assert (ch2[:block] == 524288).all()           # 0 V -> mid scale
+    assert (ch1[block:] == 0).all()                # -5 V -> zero-based 0
+    assert (ch2[block:] == 1048575).all()          # +10 V overrange -> clamped
     for _, counts, _ in sink.blocks:
         assert counts.dtype == np.uint32
+
+
+def test_never_reads_all_available_and_disables_shape_verification(fake_nidaqmx):
+    """B30 pin: the driver reads explicit counts with array verification
+    disabled — READ_ALL_AVAILABLE into the fixed buffer would fail the
+    wrapper's EXACT (chans, avail) shape check on the real library."""
+    driver = make_driver()
+    sink = StubSink()
+    block = driver._block_size(1e6)
+    FakeReader.script = [np.stack([
+        np.arange(block + 7, dtype=np.float64),
+        np.arange(block + 7, dtype=np.float64),
+    ])]
+    assert driver.start_measurement(make_session(), None, ramp_sink=sink)
+    assert _wait_for(lambda: sink.total(0) == block + 7)
+    driver.stop_measurement()
+
+    (task,) = FakeTask.all_tasks
+    assert driver._reader.verify_array_shape is False
+    assert FakeReader.requested_counts, "the driver never read"
+    assert all(c != FakeReader.READ_ALL for c in FakeReader.requested_counts), (
+        "READ_ALL_AVAILABLE must never be requested into a fixed buffer"
+    )
+    # and an oversized READ_ALL against a verifying reader fails exactly
+    # like the real wrapper (this is what the old drain did)
+    probing = FakeReader(task)
+    small = np.empty((2, 4), dtype=np.float64)
+    FakeReader._buffered = [np.zeros((2, 9))]
+    with pytest.raises(FakeDaqError):
+        probing.read_many_sample(small, FakeReader.READ_ALL, timeout=0.05)
+
+
+def test_partial_timeout_delivers_transferred_samples(fake_nidaqmx):
+    """B31 pin: a read timeout that already transferred samples into the
+    buffer (and removed them from the device buffer) must deliver them —
+    otherwise the sink counters do not advance and every subsequent
+    window is silently misaligned."""
+    driver = make_driver()
+    sink = StubSink()
+    block = driver._block_size(1e6)
+
+    FakeReader.script = [
+        # a hiccup: the read transferred 2 samples then timed out — the
+        # fake fills the caller's buffer with zeros for the partial (as
+        # the real DAQmx call does) and raises with the count
+        FakeDaqReadError("partial", READ_TIMEOUT_CODE, 2),
+        np.stack([
+            np.full(block, 5.0),
+            np.full(block, 5.0),
+        ]),
+    ]
+    assert driver.start_measurement(make_session(), None, ramp_sink=sink)
+    assert _wait_for(lambda: sink.total(0) == 2 + block)
+    assert driver.stop_measurement() is True
+    assert driver._error is False
+
+    # counters advanced across the partial: contiguous 2 + block samples
+    ch1 = sink.received(0)
+    assert len(ch1) == 2 + block
+    assert ch1[:2].tolist() == [0, 0]          # the transferred partial
+    assert (ch1[2:] == 1048575).all()          # +5 V block after it
+    assert sink.gaps == []                     # no gap needed: contiguous
 
 
 def test_single_channel_plan_streams_one_channel(fake_nidaqmx):
@@ -459,12 +604,12 @@ def test_single_channel_plan_streams_one_channel(fake_nidaqmx):
     block = driver._block_size(1e6)
     FakeReader.script = [np.stack([np.full(block, 1.0)])]
     assert driver.start_measurement(make_session(), None, ramp_sink=sink)
-    assert _wait_for(lambda: len(sink.blocks) == 1)
+    assert _wait_for(lambda: sink.total(0) == block)
     driver.stop_measurement()
 
     (task,) = FakeTask.all_tasks
     assert [c.physical_channel for c in task.ai_channels.added] == ["NI6451/ai2"]
-    assert [b[0] for b in sink.blocks] == [0]  # only ch1 -> sink channel 0
+    assert {b[0] for b in sink.blocks} == {0}  # only ch1 -> sink channel 0
 
 
 def test_mixed_terminations_allowed(fake_nidaqmx):
@@ -494,7 +639,7 @@ def test_connect_sets_33v_logic_family_on_pfi0(fake_nidaqmx):
     """The Pico's CONV_START is 3.3 V; the 6451's shared digital logic
     family defaults to 5 V (VIH >= 3.66 V — out of spec).  connect() must
     set the family to 3.3 V on the clock's physical channel."""
-    driver = NIDAQmxAquisition(device_name="NI6451")
+    driver = NIDAQmxAcquisition(device_name="NI6451")
     assert driver.connect() is True
     (chan,) = FakePhysicalChannel.instances
     assert chan.name == "NI6451/PFI0"
@@ -503,7 +648,7 @@ def test_connect_sets_33v_logic_family_on_pfi0(fake_nidaqmx):
 
 def test_connect_fails_when_logic_family_cannot_be_set(fake_nidaqmx):
     FakePhysicalChannel.fail_on_family_set = True
-    driver = NIDAQmxAquisition(device_name="NI6451")
+    driver = NIDAQmxAcquisition(device_name="NI6451")
     assert driver.connect() is False  # never arm with an out-of-spec clock
 
 
@@ -512,41 +657,48 @@ def test_connect_fails_when_logic_family_cannot_be_set(fake_nidaqmx):
 def test_block_size_and_read_timeout_scale_with_rate():
     # markers mode at T_int = 100 ms -> 10 S/s: ONE sample per read (was
     # 1024 -> ~102 s lumps), timeout ~10 block times, bounded to [0.5, 2] s
-    assert NIDAQmxAquisition._block_size(10.0) == 1
-    assert NIDAQmxAquisition._block_size(1e6) == 20_000
-    assert NIDAQmxAquisition._read_timeout_s(1, 10.0) == 1.0   # 10 block times
-    assert NIDAQmxAquisition._read_timeout_s(1, 5.0) == 2.0    # clamped at max
-    assert NIDAQmxAquisition._read_timeout_s(1, 100.0) == 0.5  # clamped at min
-    assert NIDAQmxAquisition._read_timeout_s(20_000, 1e6) == 0.5
+    assert NIDAQmxAcquisition._block_size(10.0) == 1
+    assert NIDAQmxAcquisition._block_size(1e6) == 20_000
+    assert NIDAQmxAcquisition._read_timeout_s(1, 10.0) == 1.0   # 10 block times
+    assert NIDAQmxAcquisition._read_timeout_s(1, 5.0) == 2.0    # clamped at max
+    assert NIDAQmxAcquisition._read_timeout_s(1, 100.0) == 0.5  # clamped at min
+    assert NIDAQmxAcquisition._read_timeout_s(20_000, 1e6) == 0.5
 
 
 def test_stop_drains_the_buffered_tail_before_task_stop(fake_nidaqmx):
     """Samples sitting unread in the DAQmx buffer must reach the sink
     BEFORE task.stop() discards them (measurement rows in markers mode).
     The fake discards its buffer once the task stopped, so this test only
-    passes if the driver drains first."""
+    passes if the driver drains first — including a tail that arrives
+    around the stop itself."""
     driver = make_driver()
     sink = StubSink()
     block = driver._block_size(1e6)  # 20000
-    # one script entry with block + 500 columns: the run reads `block`,
-    # the remaining 500 land in the fake's buffer and are only retrievable
-    # via the READ_ALL_AVAILABLE drain
-    entry = np.stack([
+    # first entry: block + 500 samples; the run consumes it, then the
+    # reader idles in the no-edges wait
+    first = np.stack([
         np.arange(block + 500, dtype=np.float64),
         np.arange(block + 500, dtype=np.float64) + 1000,
     ])
-    FakeReader.script = [entry]
+    FakeReader.script = [first]
 
     assert driver.start_measurement(make_session(), None, ramp_sink=sink)
-    assert _wait_for(lambda: len(sink.blocks) == 2)  # both channels, 1 block
+    assert _wait_for(lambda: sink.total(0) == block + 500)
+
+    # a second block becomes available around the stop: whatever the main
+    # loop misses must be picked up by the final drain
+    second = np.stack([
+        np.full(3000, 2.5),
+        np.full(3000, 2.5),
+    ])
+    FakeReader.script.append(second)
     assert driver.stop_measurement() is True
 
-    # the 500 buffered samples were delivered, contiguously, per channel
-    assert len(sink.blocks) == 4
-    ch, counts, idx = sink.blocks[2]
-    assert ch == 0 and idx == block and len(counts) == 500
-    ch, counts, idx = sink.blocks[3]
-    assert ch == 1 and idx == block and len(counts) == 500
+    # EVERYTHING was delivered, contiguous: (block+500) + 3000 per channel
+    total = block + 500 + 3000
+    assert sink.total(0) == total and sink.total(1) == total
+    ch1 = sink.received(0)
+    assert (ch1[block + 500:] == np.rint((2.5 + 5.0) * (2**20 - 1) / 10.0)).all()
 
 
 # --------------------------------------------- start ordering (regression)
@@ -665,7 +817,7 @@ def test_example_pico_ni_config_loads_and_wires_the_plan():
     manager = HardwareManager()
     manager.load_config(_example_path())
     driver = manager.acquisition
-    assert isinstance(driver, NIDAQmxAquisition)
+    assert isinstance(driver, NIDAQmxAcquisition)
     assert driver._channel_plan == [("ch1", "differential"), ("ch2", "differential")]
     assert manager.acquisition_max_rate_hz == 1_000_000.0
 
@@ -726,3 +878,83 @@ def test_config_rejects_wrong_bits(tmp_path):
     with pytest.raises(ConfigValidationError) as excinfo:
         load_hardware_config(_patch_example(tmp_path, mutate), registry_descriptors())
     assert any("bits" in e for e in excinfo.value.errors)
+
+
+# --------------------------------------------- stop ordering (B32)
+
+def test_stop_stops_timing_before_the_acquisition(fake_nidaqmx):
+    """Mirror of the B24 start order: the timing engine ('E') must stop
+    BEFORE the acquisition — otherwise the CONV_START edges keep flowing
+    during the drain, which never empties and strands the buffered tail
+    (and makes every stop take the full join timeout)."""
+    from services.hardware_service import HardwareService
+
+    driver = make_driver()
+    sink = StubSink()
+    timing = FakeTimingDevice()
+    manager = FakeManager(acquisition=driver, timing=timing)
+    # one shared timeline: the acquisition stop logs into the same list
+    original_stop = driver.stop_measurement
+
+    def spy_stop():
+        manager.calls.append("acq_stop")
+        return original_stop()
+
+    driver.stop_measurement = spy_stop
+
+    service = HardwareService(manager, data_model=None, session_model=make_session())
+    assert service.start_receiving(simulate=False, ramp_sink=sink) is True
+    assert service.stop_receiving(send_stop=True) is True
+
+    assert manager.calls == ["timing_start", "timing_stop", "acq_stop"]
+    assert timing.calls == ["S", "E"]
+    assert timing.task_armed_at_start is True
+
+
+# ------------------------------------- configure-time reason (B33)
+
+def test_configure_timing_raises_the_mirror_reason():
+    """configure_timing validates through the driver's mirror before
+    touching hardware: an unrepresentable request raises ValueError with
+    the reason (the wizard shows it) instead of a generic apply failure."""
+    from hardware.core.hardware_manager import HardwareManager
+    from hardware.interfaces import ActualTiming
+
+    class LimitedTiming:
+        supports_ramp_sampling = True
+
+        def calculate_ramp_timing(self, dt, int_us, reset_us):
+            if dt > 4369.0:
+                raise ValueError("ramp dt 100000 us is out of range: capped")
+            return ActualTiming(int_us, reset_us, int_us + reset_us + 2.0, 1e6 / (int_us + reset_us + 2.0))
+
+        def configure_ramp(self, dt, int_us, reset_us, period_us=None):
+            self.configured = (dt, int_us, reset_us)
+            return True
+
+        def configure_noramp(self, int_us, reset_us, period_us=None):
+            return True
+
+    timing = LimitedTiming()
+    manager = HardwareManager()
+    manager.timing = timing
+    manager.acquisition = FakeAcquisitionSpy()
+
+    with pytest.raises(ValueError, match="out of range"):
+        manager.configure_timing(False, None, 100_000.0, 500.0)
+
+    # and a representable request proceeds to the driver call
+    assert manager.configure_timing(False, None, 100.0, 500.0) is True
+    assert timing.configured == (100.0, 100.0, 500.0)  # markers: dt = int
+
+
+def test_time_window_failure_branch_makes_the_status_frame_visible():
+    """The preview reports rejections while the user is still editing —
+    the status frame must become visible in the failure branch, not only
+    on the first Apply press."""
+    import inspect
+
+    from views.time_window import TimeWindow
+
+    source = inspect.getsource(TimeWindow.on_configuration_result)
+    assert "self.status_frame.setVisible(True)" in source

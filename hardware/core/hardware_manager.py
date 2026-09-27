@@ -434,24 +434,6 @@ class HardwareManager:
             return self.timing.calculate_actual_timing(int_time_us, reset_time_us, period_us, num_channels)
         return None
 
-    def calculate_ramp_timing(
-        self,
-        ramp_dt_us: float,
-        int_time_us: float,
-        reset_time_us: float,
-    ) -> Optional[ActualTiming]:
-        """Ramp-aware preview from the driver's exact mirror (generator
-        selection + applied quantized values — the numbers the firmware's
-        'Q' reports).  None when the timing device has no ramp mirror
-        (e.g. the PIC) or cannot represent the request."""
-        if self.timing is None or not hasattr(self.timing, "calculate_ramp_timing"):
-            return None
-        try:
-            return self.timing.calculate_ramp_timing(ramp_dt_us, int_time_us, reset_time_us)
-        except ValueError as exc:
-            logger.warning("ramp timing preview rejected: %s", exc)
-            return None
-
     # ------------------------------------------------------------------
     # Timing-mode routing (internal / ramp / window markers)
     # ------------------------------------------------------------------
@@ -495,11 +477,26 @@ class HardwareManager:
         """Configure the timing device for a measurement, routed by
         timing_mode_for(): ramp sampling as requested, window markers
         (ramp generator with dt = int) on split hardware without ramp
-        sampling, classic no-ramp otherwise."""
+        sampling, classic no-ramp otherwise.
+
+        Raises ValueError (from the driver's exact mirror) when the
+        request cannot be realized — the caller must surface the reason
+        instead of failing generically at apply time."""
         if self.timing is None:
             logger.error("No timing controller assigned")
             return False
         mode = self.timing_mode_for(sample_ramp)
+        # Validate through the driver's mirror BEFORE touching hardware:
+        # an unrepresentable request raises with the reason (e.g. markers
+        # mode with T_int beyond the deployed firmware's dt cap).
+        if mode in ("ramp", "markers"):
+            mirror = getattr(self.timing, "calculate_ramp_timing", None)
+            if mirror is not None:
+                mirror(
+                    ramp_dt_us if mode == "ramp" else int_time_us,
+                    int_time_us,
+                    reset_time_us,
+                )
         if mode == "ramp":
             return self.timing.configure_ramp(ramp_dt_us, int_time_us, reset_time_us, period_us)
         if mode == "markers":

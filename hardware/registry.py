@@ -77,7 +77,7 @@ def build_registry() -> dict[str, RegisteredDriver]:
     from hardware.pico.pico_daq import PicoSerialDAQ
     from hardware.pic.pic_daq import PICSerialDAQ
     from hardware.dummy.dummy_acquisition import DummyAcquisition
-    from hardware.ni.ni_daqmx import NIDAQmxAquisition
+    from hardware.ni.ni_daqmx import NIDAQmxAcquisition
 
     registry = {
         "pico_serial_v1": _register(PicoSerialDAQ, "pico_serial_v1"),
@@ -91,7 +91,7 @@ def build_registry() -> dict[str, RegisteredDriver]:
         ),
     )
     registry["ni_daqmx_v1"] = _register(
-        NIDAQmxAquisition, "ni_daqmx_v1", factory=_daqmx_factory(NIDAQmxAquisition)
+        NIDAQmxAcquisition, "ni_daqmx_v1", factory=_daqmx_factory(NIDAQmxAcquisition)
     )
     return registry
 

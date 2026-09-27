@@ -88,13 +88,20 @@ class HardwareService:
 
         if send_stop:
             ok = True
-            if self.hardware_manager.acquisition:
-                ok = self.hardware_manager.acquisition.stop_measurement()
-            else:
-                ok = False
-            # Symmetric to the start: stop a timing engine that was started
-            # directly (no-op when the acquisition owns the stop).
+            # Mirror of the B24 start order (acquisition armed first, then
+            # the timing 'S'): stop the timing engine FIRST — the Pico
+            # finishes its current cycle and the edge train ends — THEN
+            # stop the acquisition.  Its reader then drains a STATIC
+            # buffer and task.stop() discards nothing; stopping the
+            # acquisition first would keep the edges flowing during the
+            # drain (which never empties, expires the join and strands
+            # the buffered tail).
             if not self.hardware_manager.stop_timing_signal():
+                ok = False
+            if self.hardware_manager.acquisition:
+                if not self.hardware_manager.acquisition.stop_measurement():
+                    ok = False
+            else:
                 ok = False
             return ok
         return True

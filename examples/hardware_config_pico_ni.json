@@ -2,7 +2,7 @@
     "schema_version": "1.0",
     "devices": {
         "pico_1": {
-            "name": "Pico 2 — timing + gain",
+            "name": "Pico 2 \u2014 timing + gain",
             "driver": "pico_serial_v1",
             "firmware_version": "2.0",
             "connection": {
@@ -27,7 +27,7 @@
                         "supported": true,
                         "dt_us": {
                             "min": 1,
-                            "max": 4360,
+                            "max": 10000000,
                             "step": 1
                         }
                     }
@@ -43,7 +43,7 @@
             }
         },
         "ni_6451": {
-            "name": "NI USB-6451 — acquisition",
+            "name": "NI USB-6451 \u2014 acquisition",
             "driver": "ni_daqmx_v1",
             "note": "20-bit, 1 MS/s/ch simultaneous. Clocked by CONV_START from the Pico (PFI0, rising edge). ch1 differential = AI0(+)/AI8(-); ch2 differential = AI1(+)/AI9(-). The 'device' field is the DAQmx device name.",
             "connection": {
@@ -56,12 +56,27 @@
                     "adc": {
                         "bits": 20,
                         "input_ranges_volts": [
-                            { "min_volts": -10.0, "max_volts": 10.0 },
-                            { "min_volts": -5.0, "max_volts": 5.0 },
-                            { "min_volts": -2.5, "max_volts": 2.5 },
-                            { "min_volts": -0.2, "max_volts": 0.2 }
+                            {
+                                "min_volts": -10.0,
+                                "max_volts": 10.0
+                            },
+                            {
+                                "min_volts": -5.0,
+                                "max_volts": 5.0
+                            },
+                            {
+                                "min_volts": -2.5,
+                                "max_volts": 2.5
+                            },
+                            {
+                                "min_volts": -0.2,
+                                "max_volts": 0.2
+                            }
                         ],
-                        "default_input_range_volts": { "min_volts": -5.0, "max_volts": 5.0 },
+                        "default_input_range_volts": {
+                            "min_volts": -5.0,
+                            "max_volts": 5.0
+                        },
                         "supports_oversampling": false
                     }
                 }
@@ -70,7 +85,7 @@
     },
     "circuits": {
         "board_ch1": {
-            "name": "Integrator board — detector 1",
+            "name": "Integrator board \u2014 detector 1",
             "model": "ATOMIQA integrator rev. B",
             "fixed_capacitance_pF": 22.0,
             "switchable_capacitors": [
@@ -89,7 +104,7 @@
             ]
         },
         "board_ch2": {
-            "name": "Integrator board — detector 2",
+            "name": "Integrator board \u2014 detector 2",
             "model": "ATOMIQA integrator rev. B",
             "fixed_capacitance_pF": 0.0,
             "switchable_capacitors": [

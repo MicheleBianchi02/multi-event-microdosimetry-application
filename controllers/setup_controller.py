@@ -153,6 +153,11 @@ class SetupController(QObject):
         try:
             success = self.send_timing_config(config)
             self.time_window.on_configuration_result(success)
+        except ValueError as exc:
+            # The timing mirror rejected the configuration (e.g. markers
+            # mode with T_int beyond the deployed firmware's dt cap):
+            # show the reason, not a generic failure.
+            self.time_window.on_configuration_result(False, str(exc))
         except Exception:
             self.time_window.on_configuration_result(False)
             logger.exception("Communication failed")
