@@ -12,9 +12,8 @@ from hardware.config.schema import (
     VoltageRange,
 )
 
-# Mirrors the real PicoSerialDAQ (firmware PICO2DAQ 2.1: the software
-# generator's dt is bounded by the time range only; the driver enforces
-# the deployed board's cap at runtime via the version gate).
+# Mirrors the real PicoSerialDAQ (firmware PICO2DAQ 2.1, required): the
+# software generator's dt is bounded only by the general time range.
 PICO_DESCRIPTOR = DriverDescriptor(
     capabilities=frozenset({"timing", "gain", "acquisition"}),
     timing=TimingCapability(

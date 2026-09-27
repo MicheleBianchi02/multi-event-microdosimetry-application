@@ -184,36 +184,28 @@ Severity scale:
   `test_stop_drains_the_buffered_tail_before_task_stop` — with a fake that
   discards its buffer on task stop, so only drain-before-stop passes).
 
-### B28 — Markers mode inherits the firmware's ramp-dt cap; the preview hid it — **FIXED (app side)** *(reported 2026-09-27)*
+### B28 — Markers mode inherits the firmware's ramp-dt cap; the preview hid it — **FIXED** *(reported 2026-09-27)*
 - **Intended:** window markers (split hardware, ramp sampling off, dt =
   T_int) work for the full validated integration-time range — the software
   generator has no dt-coupled bound — and a configuration the hardware
   cannot realize is rejected with a specific reason, not a generic failure.
-- **Current (as found):** firmware 2.0's `P` command validation applies the
+- **Current (as found):** the firmware's `P` command validation applied the
   PIO 16.8-divider bound (≈ 4369 µs) to **both** generators, so markers mode
   only worked for T_int ≤ ~4.37 ms; the driver mirrored that cap faithfully.
   The UI preview swallowed the mirror's rejection and fell back to the
   no-ramp numbers: the user saw plausible true values, then a generic
   "Failed to apply configuration".
-- **Fixed (2026-09-27, app side):** the driver's ramp-dt bound is now
-  version-gated — `RAMP_DT_MAX_SOFT_US` (10 s) from firmware 2.1 on,
-  the 4369 µs cap for 2.0 and while not connected — enforced in
-  `calculate_ramp_timing` and `configure_ramp` against the *deployed*
-  firmware's truth; `HardwareManager.preview_timing` re-raises the mirror's
-  rejection instead of falling back; the timing window shows the specific
-  reason (`on_configuration_result(False, message)`).
-- **Firmware half fixed (2026-09-27):** `raspberry_copy/main.c` bumped to
-  **PICO2DAQ 2.1** — the `P` command now bounds dt by the general time
-  range (10 s) when the software generator is selected (2.0 wrongly applied
-  the PIO 16.8-divider bound to both generators; the PIO path keeps its
-  bound, and its `O` application path is untouched). Boards must be
-  reflashed to unlock long-integration markers mode; until then the driver
-  rejects large dt with the reason, and the workaround is ramp sampling
-  with T_int a multiple of dt. A consistency test pins the firmware
-  source's `FW_VERSION` against the driver's `RAMP_DT_LARGE_FW` gate.
-  Regression tests: `tests/test_pico_driver.py` (dt gate on 2.0 / 2.1 /
-  unconnected, `test_shipped_firmware_satisfies_the_large_dt_gate`),
-  `tests/test_timing_routing.py`
+- **Fixed (2026-09-27):** the firmware lifted the `P` cap for the software
+  generator and was bumped to **PICO2DAQ 2.1, now the required version**
+  (2.0 support removed from the driver — no version gate, no fallback
+  bound). The driver's ramp-dt limit is the general time range (10 s),
+  enforced in `calculate_ramp_timing` and `configure_ramp`;
+  `HardwareManager.preview_timing` re-raises the mirror's rejection instead
+  of falling back; the timing window shows the specific reason
+  (`on_configuration_result(False, message)`).
+  Regression tests: `tests/test_pico_driver.py`
+  (`test_long_integration_markers_mirror`,
+  `test_dt_beyond_the_time_range_rejected`), `tests/test_timing_routing.py`
   (`test_preview_rejection_is_raised_not_swallowed`).
 
 ### B30 — The B27 stop-drain was ineffective against the real nidaqmx wrapper — **FIXED** *(reported 2026-09-27)*
@@ -290,6 +282,26 @@ Severity scale:
   `tests/test_ni_driver.py`
   (`test_configure_timing_raises_the_mirror_reason`,
   `test_time_window_failure_branch_makes_the_status_frame_visible`).
+
+### B34 — Simulation Apply reported success for configurations the preview had rejected — **FIXED** *(reported 2026-09-27)*
+- **Intended:** Apply must never report success for a configuration the
+  timing mirror cannot realize — in simulation there is no hardware to
+  refuse it later, so the validation has to happen at Apply time.
+- **Current (as found):** the simulate path of *Apply Configuration*
+  returned success unconditionally
+  (`controllers/setup_controller.py`, before the fix), so a configuration
+  the preview had just rejected (e.g. markers mode with an out-of-range
+  dt) showed "Applied Successfully". (The preview-rejection display itself
+  was already fixed with the B33 frame visibility; the reviewer's report
+  predates that commit.)
+- **Fixed (2026-09-27):** `HardwareManager.validate_timing()` runs the
+  driver's mirror as a pure check (shared by `configure_timing`), and the
+  simulate path of Apply calls it first — a rejection shows the specific
+  reason instead of success. Without a timing controller (config-less
+  simulation) nothing is validated yet — see B21 for that remaining gap.
+  Regression test: `tests/test_ni_driver.py`
+  (`test_configure_timing_raises_the_mirror_reason` covers the shared
+  helper).
 
 ---
 

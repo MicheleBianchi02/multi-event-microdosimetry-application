@@ -10,7 +10,7 @@
             "type": "serial",
             "baud_rate": 115200
         },
-        "note": "Firmware PICO2DAQ 2.1 (dt > 4369 us needs >= 2.1; on 2.0 boards the driver rejects it with the reason). Pin map (GPIO, not pad position): GP14 integrator reset, GP15 ramp trigger, GP16 event mode, GP17-19 capacitor bits 0-2, GP26 ADC input (0-3.3 V, no front-end scaler). No port to fill in: the app opens /dev/atomiqa/<device id>, created by the udev rule.",
+        "note": "Firmware PICO2DAQ 2.1 (required). Pin map (GPIO, not pad position): GP14 integrator reset, GP15 ramp trigger, GP16 event mode, GP17-19 capacitor bits 0-2, GP26 ADC input (0-3.3 V, no front-end scaler). No port to fill in: the app opens /dev/atomiqa/<device id>, created by the udev rule.",
         "capabilities": {
             "timing": {
                 "integration_time_us": {

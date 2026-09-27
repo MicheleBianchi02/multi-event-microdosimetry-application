@@ -145,8 +145,20 @@ class SetupController(QObject):
                 self.session.capacitance_pf_ch2 = hw_mgr.get_capacitance(2, g2_label)
                 self.session.gpio_mask_ch2 = hw_mgr.get_gain_mask(2, g2_label)
 
-        # We check if simulate is true. If so, return success immediately.
+        # Simulation: there is no hardware to talk to, but the
+        # configuration must still be REALIZABLE — a request the timing
+        # mirror rejects must not report "Applied Successfully" (B34).
         if self.setup_view.simulate:
+            try:
+                hw_mgr.validate_timing(
+                    sample_ramp=bool(config.get("sample_ramp", False)),
+                    ramp_dt_us=config.get("ramp_dt_us"),
+                    int_time_us=config["int_time_us"],
+                    reset_time_us=config["reset_time_us"],
+                )
+            except ValueError as exc:
+                self.time_window.on_configuration_result(False, str(exc))
+                return
             self.time_window.on_configuration_result(True)
             return
 

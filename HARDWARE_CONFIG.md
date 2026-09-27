@@ -291,7 +291,7 @@ Shipped components:
 
 | Fragment | Provides |
 |---|---|
-| `device_pico2.json` | Raspberry Pi Pico 2 (firmware PICO2DAQ 2.1) — timing (int ≥ 5 µs, reset ≥ 5 µs, dt 1 µs…10 s), gain (3 pins: GP17/18/19), acquisition (1 channel, 12 bit, 0…3.3 V). The dt envelope follows the *connected* firmware: 2.1 lifted the software generator's dt cap (markers mode with long integrations, ramp sampling with coarse dt); on boards still running 2.0 the driver enforces the 4360 µs cap and rejects larger dt with the reason. |
+| `device_pico2.json` | Raspberry Pi Pico 2 (firmware **PICO2DAQ 2.1, required**) — timing (int ≥ 5 µs, reset ≥ 5 µs, dt 1 µs…10 s), gain (3 pins: GP17/18/19), acquisition (1 channel, 12 bit, 0…3.3 V). The dt range covers the software generator (markers mode with long integrations, ramp sampling with coarse dt); the PIO generator is auto-selected only up to 100 µs. |
 | `device_pic.json` | PIC — timing (no ramp sampling), gain (1 pin), acquisition (2 channels, 12 bit, 0…5 V). |
 | `device_usb6451.json` | NI USB-6451 — acquisition only (DAQmx device `NI6451`): 2 simultaneous channels, 20 bit, ±0.2/±2.5/±5/±10 V (default ±5 V), clocked by the external CONV_START from the timing device. Combine with a timing µC (e.g. the Pico fragment without its acquisition block). |
 | `device_dummy_acquisition.json` | Virtual acquisition (`dummy_v1`): bench tests only, no data. |

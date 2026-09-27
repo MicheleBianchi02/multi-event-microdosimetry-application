@@ -1,4 +1,4 @@
-"""Concrete driver for the Raspberry Pi Pico 2 DAQ board (firmware PICO2DAQ >= 2.0).
+"""Concrete driver for the Raspberry Pi Pico 2 DAQ board (firmware PICO2DAQ 2.1).
 
 The firmware protocol, pin map and validation limits are documented in
 ``raspberry_copy/README.md`` (the firmware source folder); this module is
@@ -61,18 +61,12 @@ FW_NAME = "PICO2DAQ"
 SYS_CLK_MHZ = 150.0                     # timing quantization mirror
 STREAM_MARKER = 0xFFFFFFFF              # both halves > 12 bits: never data
 ADC_SAMPLE_MAX = (1 << 12) - 1          # 12-bit ADC
-# The PIO ramp generator's 16.8 clock divider bound: one trigger pulse
-# costs 10 PIO cycles, so dt <= 65536 * 10 sys-clocks.
-RAMP_DT_MAX_US = 65536.0 * 10.0 / SYS_CLK_MHZ
-# The software generator has no dt-coupled bound (one-clock-cycle
-# resolution, DWT-anchored): dt is limited only by the 10 s time range.
-# BUT firmware 2.0's 'P' validation applies the PIO-derived cap above to
-# BOTH generators, so dt beyond RAMP_DT_MAX_US only works from
-# RAMP_DT_LARGE_FW on — until then _validate_ramp_dt_us enforces the
-# deployed firmware's truth at runtime, whatever the config declares
-# (markers mode with long T_int: dt = T_int).
-RAMP_DT_MAX_SOFT_US = 10_000_000.0
-RAMP_DT_LARGE_FW = (2, 1)  # first firmware without the 'P' dt cap
+# Ramp dt upper bound = the general time range: the software generator
+# (the app path for dt > 100 us) has one-clock-cycle resolution and no
+# dt-coupled bound, and the PIO generator is never driven past
+# RAMP_PIO_MAX_US by the auto-selection, so its 16.8 divider constraint
+# is trivially satisfied.
+RAMP_DT_MAX_US = 10_000_000.0
 # Ramp process v2 (identical in both generators): reset LOW -> settle
 # (RESET HIGH, no pulses) -> N = int/dt + 1 pulses (50% duty) -> restart.
 # The application-level reset time is the RESET-LOW duration.
@@ -90,7 +84,7 @@ _IDENTITY_RE = re.compile(r"^V (\S+) (\S+) (\S+) (\d+(?:\.\d+)?)$")
 
 
 class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
-    """Raspberry Pi Pico 2 running the PICO2DAQ 2.0 firmware."""
+    """Raspberry Pi Pico 2 running the PICO2DAQ 2.1 firmware."""
 
     # --- Hardcoded layer-1 limits (enforced on every call; the config's
     # --- declared envelope is validated against these at load time).
@@ -110,7 +104,7 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
             # the software generator's ultimate bound; the firmware-version
             # gate (_validate_ramp_dt_us) enforces the tighter deployed-
             # firmware cap at runtime
-            True, dt_us=ParameterBounds(1, RAMP_DT_MAX_SOFT_US, 1)
+            True, dt_us=ParameterBounds(1, RAMP_DT_MAX_US, 1)
         ),
     )
 
@@ -395,34 +389,13 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
         above it (one system-clock-cycle resolution)."""
         return "pio" if ramp_dt_us <= RAMP_PIO_MAX_US else "software"
 
-    def _fw_supports_large_dt(self) -> bool:
-        """Whether the connected firmware lifted the 'P' dt cap for the
-        software generator (read from the 'V' handshake; conservative
-        False while not connected or on a parse failure)."""
-        version = (getattr(self, "identity", None) or {}).get("version", "")
-        try:
-            parts = tuple(int(p) for p in str(version).split(".")[:2])
-        except (TypeError, ValueError):
-            return False
-        return len(parts) == 2 and parts >= RAMP_DT_LARGE_FW
-
     def _validate_ramp_dt_us(self, ramp_dt_us: float) -> None:
-        """Layer-1 dt check against the DEPLOYED firmware's truth: 2.0's
-        'P' command caps dt at the PIO divider bound for both generators;
-        from RAMP_DT_LARGE_FW the software generator's full range applies.
-        Raises ValueError with the reason (shown by the timing preview)."""
-        if self._fw_supports_large_dt():
-            limit, why = RAMP_DT_MAX_SOFT_US, "software generator range"
-        else:
-            limit, why = RAMP_DT_MAX_US, (
-                "the connected firmware caps ramp dt at "
-                f"{RAMP_DT_MAX_US:.0f} us for both generators (a PIO "
-                "divider bound; lifted for the software generator from "
-                f"firmware {'.'.join(map(str, RAMP_DT_LARGE_FW))})"
-            )
-        if ramp_dt_us > limit or ramp_dt_us <= 0:
+        """Layer-1 dt check: 0 < dt <= RAMP_DT_MAX_US.  Raises ValueError
+        with the reason (shown by the timing preview and Apply)."""
+        if ramp_dt_us > RAMP_DT_MAX_US or ramp_dt_us <= 0:
             raise ValueError(
-                f"ramp dt {ramp_dt_us:g} us is out of range: {why}"
+                f"ramp dt {ramp_dt_us:g} us is out of range "
+                f"(0 < dt <= {RAMP_DT_MAX_US:g} us)"
             )
 
     def calculate_ramp_timing(

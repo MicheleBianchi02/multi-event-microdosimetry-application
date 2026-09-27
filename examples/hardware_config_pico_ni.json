@@ -9,7 +9,7 @@
                 "type": "serial",
                 "baud_rate": 115200
             },
-            "note": "Firmware PICO2DAQ 2.0. Generates the timing (integration/reset, ramp triggers on GP15 -> CONV_START) and switches the capacitors. No port here: auto-connect opens /dev/atomiqa/pico_1 (udev rule).",
+            "note": "Firmware PICO2DAQ 2.1. Generates the timing (integration/reset, ramp triggers on GP15 -> CONV_START) and switches the capacitors. No port here: auto-connect opens /dev/atomiqa/pico_1 (udev rule).",
             "capabilities": {
                 "timing": {
                     "integration_time_us": {
