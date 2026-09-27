@@ -273,6 +273,8 @@ def test_storage_roundtrip_files_and_pairs(tmp_path):
 
 
 def test_storage_records_gap_on_index_jump(tmp_path):
+    from core.constants import overflow_sentinel
+
     pairs = []
     paths = [str(tmp_path / "ch1.bin")]
     storage = RampStorageService(
@@ -284,9 +286,10 @@ def test_storage_records_gap_on_index_jump(tmp_path):
     storage.write_block(0, np.arange(8, 12, dtype=np.uint32), 8)  # jump: window 1 lost
     summary = storage.close()
 
+    fill = (overflow_sentinel(16), overflow_sentinel(16))  # single channel: padded
     assert len(pairs) == 2  # windows 0 and 2
-    assert pairs[0] == ((0, 3),)
-    assert pairs[1] == ((8, 11),)
+    assert pairs[0] == ((0, 3), fill)
+    assert pairs[1] == ((8, 11), fill)
     assert summary["channels"]["ch1"]["gaps"] == [[4, 4]]
 
 
@@ -300,6 +303,92 @@ def test_storage_rejects_block_after_close(tmp_path):
     storage.close()
     with pytest.raises(RuntimeError):
         storage.write_block(0, np.array([1, 2], dtype=np.uint32))
+
+
+# --------------------------------------------------- single-channel padding
+
+def test_single_channel_pairs_are_sentinel_padded_like_the_drivers(tmp_path):
+    """B25 regression: a single-detector split-hardware run must emit the
+    SAME two-slot shape the µC drivers emit (absent CH2 = overflow
+    sentinel) — the classic pipeline's convert_data_debug/DataModel ingest
+    used to crash on 1-tuples inside the 50 ms UI tick."""
+    from core.constants import overflow_sentinel
+    from core.data_utils import convert_data_debug
+    from models.data_model import DataModel
+
+    pairs = []
+    storage = RampStorageService(
+        channel_paths=[str(tmp_path / "ch1.bin")],
+        metas=[make_meta(0, "ch1", n=4, adc_bits=16)],
+        index_path=str(tmp_path / "index.json"),
+        samples_per_window=4,
+        on_window_pairs=pairs.extend,
+    )
+    for w in range(3):
+        storage.write_block(
+            0, np.array([100, 110, 120, 130], dtype=np.uint32) + w * 4, w * 4
+        )
+    summary = storage.close()
+
+    sentinel = overflow_sentinel(16)
+    fill = (sentinel, sentinel)
+    assert pairs == [
+        ((100, 130), fill),
+        ((104, 134), fill),
+        ((108, 138), fill),
+    ]
+    # only one binary file exists for one channel
+    assert set(summary["channels"]) == {"ch1"}
+
+    # the classic pipeline accepts the shape and NaN-fills the absent channel
+    start, stop, diff = convert_data_debug(list(pairs), sentinel=sentinel)
+    assert diff[0, 0] == 30.0
+    assert np.isnan(diff[:, 1]).all()
+
+    # and the full DataModel ingest (the reported crash path) works
+    dm = DataModel()
+    dm.configure_adc(16)
+    dm.ingest_raw_batch(
+        raw_batch=list(pairs), debug_mode=True, rois=None,
+        sample_frequency=1000.0, time_rois=[],
+    )
+    assert dm.bar_data_ch1[30] == 3
+    assert dm.count_ch2 == 0
+
+
+def test_single_channel_markers_sink_pads_pairs():
+    from core.constants import overflow_sentinel
+    from core.data_utils import convert_data_debug
+
+    pairs = []
+    sink = RampPairExtractorService(
+        samples_per_window=2, channels=[0],
+        on_window_pairs=pairs.extend, adc_bits=12,
+    )
+    sink.write_block(0, np.array([10, 999], dtype=np.uint32), 0)
+    summary = sink.close()
+
+    sentinel = overflow_sentinel(12)
+    assert pairs == [((10, 999), (sentinel, sentinel))]
+    start, stop, diff = convert_data_debug(list(pairs), sentinel=sentinel)
+    assert diff[0, 0] == 989.0
+    assert np.isnan(diff[0, 1])
+    assert summary["windows_emitted"] == 1
+
+
+def test_two_channel_pairs_are_unaffected_by_the_padding_option(tmp_path):
+    pairs = []
+    storage = RampStorageService(
+        channel_paths=[str(tmp_path / "ch1.bin"), str(tmp_path / "ch2.bin")],
+        metas=[make_meta(0, "ch1", n=2), make_meta(1, "ch2", n=2)],
+        index_path=str(tmp_path / "index.json"),
+        samples_per_window=2,
+        on_window_pairs=pairs.extend,
+    )
+    storage.write_block(0, np.array([10, 20], dtype=np.uint32), 0)
+    storage.write_block(1, np.array([30, 40], dtype=np.uint32), 0)
+    storage.close()
+    assert pairs == [((10, 20), (30, 40))]  # both slots carry real samples
 
 
 # -------------------------------------------------------- publish & recover

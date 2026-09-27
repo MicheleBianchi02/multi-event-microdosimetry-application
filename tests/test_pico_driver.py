@@ -551,3 +551,76 @@ def test_all_in_one_timing_signal_is_a_noop(tmp_path):
     assert fake.commands == []
     assert manager.stop_timing_signal() is True
     assert fake.commands == []
+
+
+# ----------------------------------------------------------------------
+# Ramp-dt bound vs the deployed firmware (bug: the software generator has
+# no dt cap, but firmware 2.0's 'P' validation applies the PIO-derived
+# 4369 us bound to BOTH generators; markers mode with long T_int hits it)
+# ----------------------------------------------------------------------
+
+def _with_identity(driver, version):
+    driver.identity = {
+        "firmware": "PICO2DAQ",
+        "version": version,
+        "board_id": "TESTBOARD",
+        "clk_mhz": 150.0,
+    }
+    return driver
+
+
+def test_dt_beyond_4369_rejected_on_firmware_2_0(fake, driver):
+    _with_identity(driver, "2.0")
+    # markers-mode shape: dt = T_int = 100 ms (software generator)
+    with pytest.raises(ValueError, match="caps ramp dt"):
+        driver.calculate_ramp_timing(100_000.0, 100_000.0, 500.0)
+    # and configure refuses BEFORE any serial traffic
+    assert driver.configure_ramp(100_000.0, 100_000.0, 500.0) is False
+    assert fake.commands == []
+
+
+def test_dt_beyond_4369_accepted_from_firmware_2_1(fake, driver):
+    _with_identity(driver, "2.1")
+    actual = driver.calculate_ramp_timing(100_000.0, 100_000.0, 500.0)
+    # software generator mirror: N = int/dt + 1 = 2 pulses, settle 2 us
+    assert actual.int_time_us == pytest.approx(100_000.0)
+    assert actual.reset_time_us == pytest.approx(500.0)
+    assert actual.period_us == pytest.approx(500.0 + 2.0 + 2 * 100_000.0)
+
+
+def test_dt_bound_unconnected_is_conservative(fake, driver):
+    # no identity (never connected): assume the old firmware
+    with pytest.raises(ValueError):
+        driver.calculate_ramp_timing(10_000.0, 10_000.0, 500.0)
+
+
+def test_dt_below_pio_bound_still_fine_on_both(fake, driver):
+    for version in ("2.0", "2.1"):
+        _with_identity(driver, version)
+        actual = driver.calculate_ramp_timing(50.0, 200.0, 20.0)
+        assert actual.int_time_us > 0
+
+
+# ----------------------------------------------------------------------
+# Firmware/driver version consistency: the driver's large-dt gate
+# (RAMP_DT_LARGE_FW) must be satisfiable by the firmware source shipped in
+# raspberry_copy — i.e. the flashed PICO2DAQ version reports >= 2.1, the
+# release that lifted the 'P' dt cap for the software generator.
+# ----------------------------------------------------------------------
+
+def test_shipped_firmware_satisfies_the_large_dt_gate():
+    import re
+    from pathlib import Path
+
+    main_c = Path(__file__).resolve().parent.parent / "raspberry_copy" / "main.c"
+    if not main_c.exists():
+        pytest.skip("raspberry_copy not present (firmware lives in its own checkout)")
+    m = re.search(r'#define FW_VERSION\s+"(\d+)\.(\d+)"', main_c.read_text())
+    assert m, "FW_VERSION define not found in the firmware source"
+    from hardware.pico.pico_daq import RAMP_DT_LARGE_FW
+
+    assert tuple(int(g) for g in m.groups()) >= RAMP_DT_LARGE_FW, (
+        "the firmware source's FW_VERSION is older than the driver's "
+        "RAMP_DT_LARGE_FW gate: long-integration markers mode would stay "
+        "locked until the firmware is bumped (or the gate lowered)."
+    )

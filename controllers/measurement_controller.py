@@ -716,6 +716,7 @@ class MeasurementController(QObject):
                 channels=list(range(num_channels)),
                 on_window_pairs=self._on_ramp_window_pairs,
                 overflow_policy="block",  # analysis data: never drop
+                adc_bits=session.adc_bits,  # pad absent channel like the drivers
             )
             return self._ramp_storage
 

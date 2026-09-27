@@ -64,6 +64,15 @@ ADC_SAMPLE_MAX = (1 << 12) - 1          # 12-bit ADC
 # The PIO ramp generator's 16.8 clock divider bound: one trigger pulse
 # costs 10 PIO cycles, so dt <= 65536 * 10 sys-clocks.
 RAMP_DT_MAX_US = 65536.0 * 10.0 / SYS_CLK_MHZ
+# The software generator has no dt-coupled bound (one-clock-cycle
+# resolution, DWT-anchored): dt is limited only by the 10 s time range.
+# BUT firmware 2.0's 'P' validation applies the PIO-derived cap above to
+# BOTH generators, so dt beyond RAMP_DT_MAX_US only works from
+# RAMP_DT_LARGE_FW on — until then _validate_ramp_dt_us enforces the
+# deployed firmware's truth at runtime, whatever the config declares
+# (markers mode with long T_int: dt = T_int).
+RAMP_DT_MAX_SOFT_US = 10_000_000.0
+RAMP_DT_LARGE_FW = (2, 1)  # first firmware without the 'P' dt cap
 # Ramp process v2 (identical in both generators): reset LOW -> settle
 # (RESET HIGH, no pulses) -> N = int/dt + 1 pulses (50% duty) -> restart.
 # The application-level reset time is the RESET-LOW duration.
@@ -98,7 +107,10 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
         reset_time_us=ParameterBounds(5, 10_000_000, 1),
         period_us=None,  # derived by the firmware: period = int + reset
         ramp_sampling=RampSamplingConfig(
-            True, dt_us=ParameterBounds(1, RAMP_DT_MAX_US, 1)
+            # the software generator's ultimate bound; the firmware-version
+            # gate (_validate_ramp_dt_us) enforces the tighter deployed-
+            # firmware cap at runtime
+            True, dt_us=ParameterBounds(1, RAMP_DT_MAX_SOFT_US, 1)
         ),
     )
 
@@ -383,6 +395,36 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
         above it (one system-clock-cycle resolution)."""
         return "pio" if ramp_dt_us <= RAMP_PIO_MAX_US else "software"
 
+    def _fw_supports_large_dt(self) -> bool:
+        """Whether the connected firmware lifted the 'P' dt cap for the
+        software generator (read from the 'V' handshake; conservative
+        False while not connected or on a parse failure)."""
+        version = (getattr(self, "identity", None) or {}).get("version", "")
+        try:
+            parts = tuple(int(p) for p in str(version).split(".")[:2])
+        except (TypeError, ValueError):
+            return False
+        return len(parts) == 2 and parts >= RAMP_DT_LARGE_FW
+
+    def _validate_ramp_dt_us(self, ramp_dt_us: float) -> None:
+        """Layer-1 dt check against the DEPLOYED firmware's truth: 2.0's
+        'P' command caps dt at the PIO divider bound for both generators;
+        from RAMP_DT_LARGE_FW the software generator's full range applies.
+        Raises ValueError with the reason (shown by the timing preview)."""
+        if self._fw_supports_large_dt():
+            limit, why = RAMP_DT_MAX_SOFT_US, "software generator range"
+        else:
+            limit, why = RAMP_DT_MAX_US, (
+                "the connected firmware caps ramp dt at "
+                f"{RAMP_DT_MAX_US:.0f} us for both generators (a PIO "
+                "divider bound; lifted for the software generator from "
+                f"firmware {'.'.join(map(str, RAMP_DT_LARGE_FW))})"
+            )
+        if ramp_dt_us > limit or ramp_dt_us <= 0:
+            raise ValueError(
+                f"ramp dt {ramp_dt_us:g} us is out of range: {why}"
+            )
+
     def calculate_ramp_timing(
         self, ramp_dt_us: float, int_time_us: float, reset_time_us: float
     ) -> ActualTiming:
@@ -392,8 +434,10 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
         UI shows these values; configure_ramp() programs exactly this.
 
         Raises ValueError when the request cannot be represented
-        (int < dt: the minimum integration is one interval = 2 pulses).
+        (int < dt: the minimum integration is one interval = 2 pulses; or
+        dt beyond the deployed firmware's cap — see _validate_ramp_dt_us).
         """
+        self._validate_ramp_dt_us(ramp_dt_us)
         generator = self.ramp_generator_for(ramp_dt_us)
         clk = SYS_CLK_MHZ * 1e6
         int_cycles = math.floor(int_time_us * SYS_CLK_MHZ)
@@ -441,11 +485,10 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
     def configure_ramp(self, ramp_dt_us: float, int_time_us: float, reset_time_us: float, period_us: float = None) -> bool:
         if not self._validate_timing_us(int_time_us, reset_time_us):
             return False
-        dt_limits = self.HARDWARE_LIMITS.ramp_sampling.dt_us
-        if dt_limits is not None and not dt_limits.contains_value(ramp_dt_us):
-            logger.error(
-                "ramp dt %s us out of hardware limits %s", ramp_dt_us, dt_limits
-            )
+        try:
+            self._validate_ramp_dt_us(ramp_dt_us)
+        except ValueError as exc:
+            logger.error("ramp configuration rejected: %s", exc)
             return False
 
         # The exact mirror decides representability and the applied values;

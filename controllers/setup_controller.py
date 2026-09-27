@@ -172,14 +172,26 @@ class SetupController(QObject):
         # degenerate ramp feeding the external digitizer); otherwise plain
         # timing (PIC quantization depends on the channel count, injected
         # by the manager).
-        actual, mode = hw_mgr.preview_timing(
-            sample_ramp=ramp_dt_us is not None,
-            ramp_dt_us=ramp_dt_us,
-            int_time_us=int_time_s * 1e6,
-            reset_time_us=reset_time_s * 1e6,
-            period_us=period_us,
-        )
+        try:
+            actual, mode = hw_mgr.preview_timing(
+                sample_ramp=ramp_dt_us is not None,
+                ramp_dt_us=ramp_dt_us,
+                int_time_us=int_time_s * 1e6,
+                reset_time_us=reset_time_s * 1e6,
+                period_us=period_us,
+            )
+        except ValueError as exc:
+            # The driver's mirror rejected the request (e.g. markers mode
+            # with T_int beyond the firmware's dt cap): say why instead of
+            # silently showing no-ramp numbers that can never be applied.
+            self.time_window.on_configuration_result(False, str(exc))
+            return
         if actual is None:
+            self.time_window.on_configuration_result(
+                False,
+                "The timing device cannot realize this configuration "
+                "(see the log for the reason).",
+            )
             return
         self.session.timing_mode = mode
         self.session.int_time = actual.int_time_us / 1e6

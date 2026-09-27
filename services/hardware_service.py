@@ -41,18 +41,31 @@ class HardwareService:
                 self._error = True
                 return False
 
-            # A timing device that does not hold the acquisition role (e.g.
-            # virtual acquisition on the bench) must still run its signals:
-            # the start goes to it directly, only nothing is recorded.
-            if not self.hardware_manager.start_timing_signal():
-                logger.error("Starting the timing engine failed")
-                self._error = True
-                return False
-
+            # ORDER MATTERS: arm the acquisition FIRST, start the timing
+            # engine SECOND.  The NI task is clocked by the timing device's
+            # CONV_START edges and ignores them while not armed — if the
+            # edges began first, the first converted sample would land at
+            # an arbitrary phase inside a window and every start/stop pair
+            # would be misaligned.  Armed first, the first edge after the
+            # timing 'S' is the first sample of window 0 (the sink's
+            # alignment contract).
             success = self.hardware_manager.acquisition.start_measurement(
                 self.session, self.data_model, ramp_sink=ramp_sink
             )
             if not success:
+                self._error = True
+                return False
+
+            # A timing device that does not hold the acquisition role (e.g.
+            # virtual acquisition on the bench, or a µC timing while the NI
+            # acquires) starts its engine here — after the consumer is armed.
+            if not self.hardware_manager.start_timing_signal():
+                logger.error("Starting the timing engine failed")
+                # stop the armed acquisition again: nothing was timed
+                try:
+                    self.hardware_manager.acquisition.stop_measurement()
+                except Exception:
+                    logger.exception("Stopping the acquisition after a timing start failure failed")
                 self._error = True
                 return False
         else:

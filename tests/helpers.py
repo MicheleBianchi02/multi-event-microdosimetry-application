@@ -12,15 +12,16 @@ from hardware.config.schema import (
     VoltageRange,
 )
 
-# Mirrors the real PicoSerialDAQ (firmware PICO2DAQ 2.0): the firmware
-# validates 'T'/'P' against the same numbers.
+# Mirrors the real PicoSerialDAQ (firmware PICO2DAQ 2.1: the software
+# generator's dt is bounded by the time range only; the driver enforces
+# the deployed board's cap at runtime via the version gate).
 PICO_DESCRIPTOR = DriverDescriptor(
     capabilities=frozenset({"timing", "gain", "acquisition"}),
     timing=TimingCapability(
         integration_time_us=ParameterBounds(5, 10_000_000, 1),
         reset_time_us=ParameterBounds(5, 10_000_000, 1),
         period_us=None,
-        ramp_sampling=RampSamplingConfig(True, dt_us=ParameterBounds(0.1, 65536.0 * 10.0 / 150.0, 0.1)),
+        ramp_sampling=RampSamplingConfig(True, dt_us=ParameterBounds(1, 10_000_000, 1)),
     ),
     gain_max_pins=3,
     adc_bits=12,

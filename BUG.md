@@ -90,6 +90,132 @@ Severity scale:
   the archive's `hardware_settings.adc.input_range_volts` at load, like
   `adc_bits` already is (make the field read-only when the range is fixed).
 
+### B24 — NI stream not aligned to the integration-window grid (start ordering) — **FIXED** *(reported 2026-09-27)*
+- **Intended:** the first converted sample of a ramp/markers stream is the
+  first CONV_START edge after the timing start — sample 0 of window 0, the
+  alignment the window extractor (`services/ramp_storage.py`) and the
+  `IRampSink` contract assume.
+- **Current (as found):** `HardwareService.start_receiving` started the
+  *timing* engine first ('S' to the Pico — edges flow within µs) and only
+  then the NI task, whose `task.start()` ran inside the reader thread tens
+  of ms later. The USB-6451 ignores AI Sample Clock while no acquisition is
+  in progress, so the first converted sample landed at an arbitrary phase
+  inside a window: markers mode paired (stop_k, start_{k+1}) — negative
+  differences, every row NaN (~50% of runs, the phase is random); ramp mode
+  chunked with a permanent phase offset (pairs spanned the reset gap, the
+  .bin time grid shifted). Nothing detected or re-synchronized, and the unit
+  tests hid it (fake reader and simulator emit window-aligned whole blocks
+  starting at index 0).
+- **Fixed (2026-09-27):** arm the clock consumer before the clock producer.
+  `NIDAQmxAquisition.start_measurement` now starts the task *before*
+  returning (verified: the regression test checks the task is armed at the
+  moment the timing 'S' is sent, and fails on the old ordering);
+  `start_receiving` arms the acquisition first and starts the timing second,
+  stopping the armed acquisition again if the timing start fails; the NI
+  reader treats DAQmx read timeouts (-200284) as "no CONV_START edges yet —
+  keep waiting" (the armed task legitimately sees no samples until 'S').
+  The firmware guarantees alignment: no edges during reset/settle, first
+  integration edge at t=0 of the window (raspberry_copy/README.md), so the
+  first edge after 'S' defines window 0. All-in-one Pico runs are unaffected
+  (firmware-synchronized ADC). Regression tests:
+  `tests/test_ni_driver.py` (`test_acquisition_is_armed_before_timing_start`
+  and the arming/timeout-tolerance/cleanup tests).
+
+### B25 — Single-channel ramp/markers crashes the measurement loop — **FIXED** *(reported 2026-09-27)*
+- **Intended:** the classic pipeline has a fixed two-channel data shape; a
+  single-detector run emits the absent CH2 sentinel-filled (NaN after
+  conversion), exactly like the µC drivers do — regardless of which
+  acquisition hardware produces the stream.
+- **Current (as found):** `RampWindowExtractor._drain` built the emitted
+  tuple over the *configured* channels only, so a one-detector split-hardware
+  run (ch2 omitted, HARDWARE_CONFIG §2.3) emitted 1-tuples
+  `((start, stop),)`. `convert_data_debug` unpacks the two-channel shape
+  unconditionally and raised `ValueError` — inside `ingest_raw_batch`, called
+  from the 50 ms Qt timer slot, where an unhandled exception aborts the
+  PyQt6 process. Single-channel *simulation* of ramp mode crashed the same
+  way (same sink). The end-to-end tests all used two channels, so the suite
+  never exercised the shape.
+- **Fixed (2026-09-27):** the extractor gained an optional `pad_sentinel`;
+  with it, every emitted pair carries both channel slots and an absent
+  channel is filled with `overflow_sentinel(bits)` — the same convention as
+  the drivers, NaN-mapped downstream. `RampStorageService` derives the
+  sentinel from its channel metadata automatically;
+  `RampPairExtractorService` (markers mode) takes `adc_bits`, passed by the
+  controller from the session. Two-channel runs emit byte-identical pairs.
+  Regression tests: `tests/test_ramp_storage.py`
+  (`test_single_channel_pairs_are_sentinel_padded_like_the_drivers` —
+  through `convert_data_debug` *and* a full `DataModel.ingest_raw_batch`,
+  the reported crash path — plus the markers-sink and two-channel checks).
+
+### B26 — PFI0 clock input out of spec: digital logic family left at the 5 V default — **FIXED** *(reported 2026-09-27)*
+- **Intended:** the Pico's 3.3 V CONV_START drives the NI's sample-clock
+  input within the guaranteed logic levels.
+- **Current (as found):** the USB-6451's shared digital logic family
+  defaults to **5 V**, whose guaranteed V_IH is **3.66 V** (specs Table 17) —
+  below the Pico's 3.3 V high (the 3.3 V family needs only 2.00 V). The
+  driver documented "digital, 3.3 V" but never configured the family: the
+  clock was out of spec and would only work marginally (real thresholds sit
+  below the worst-case guarantee).
+- **Fixed (2026-09-27):** `connect()` sets `dig_port_logic_family` to 3.3 V
+  on the clock's physical channel (nidaqmx `LogicFamily.THREE_POINT_THREE_V`,
+  shared for all digital lines per the manual) and fails the connection when
+  the set is rejected — an out-of-spec clock is never armed. Regression
+  tests: `tests/test_ni_driver.py`
+  (`test_connect_sets_33v_logic_family_on_pfi0`,
+  `test_connect_fails_when_logic_family_cannot_be_set`).
+
+### B27 — Low-rate markers stream: ~100 s delivery lumps and the buffered tail lost at stop — **FIXED** *(reported 2026-09-27)*
+- **Intended:** the live pipeline tracks the measurement rate, and every
+  acquired sample reaches the sink — in markers mode the samples ARE
+  measurement rows.
+- **Current (as found):** the read block size was floored at 1024 samples
+  and the read timeout scaled as 10 block times: at markers rate = 1/T_int,
+  T_int = 100 ms meant one read per **~102 s** (dashboard frozen in between)
+  and a ~17 min timeout; at STOP, `task.stop()` discarded whatever sat
+  unread in the DAQmx buffer — up to 1023 windows of analysis data, silently.
+- **Fixed (2026-09-27):** the block size targets ~20 ms of samples with **no
+  floor** (1 sample per read at 10 S/s); the read timeout is bounded to
+  [0.5, 2] s; `stop_measurement` joins the reader FIRST — it drains the
+  buffer with `READ_ALL_AVAILABLE` before `task.stop()` discards it. The
+  drain also exposed (and the test pinned) a second bug: a stop landing
+  mid-wait used to re-raise the read timeout and skip the drain entirely.
+  Regression tests: `tests/test_ni_driver.py`
+  (`test_block_size_and_read_timeout_scale_with_rate`,
+  `test_stop_drains_the_buffered_tail_before_task_stop` — with a fake that
+  discards its buffer on task stop, so only drain-before-stop passes).
+
+### B28 — Markers mode inherits the firmware's ramp-dt cap; the preview hid it — **FIXED (app side)** *(reported 2026-09-27)*
+- **Intended:** window markers (split hardware, ramp sampling off, dt =
+  T_int) work for the full validated integration-time range — the software
+  generator has no dt-coupled bound — and a configuration the hardware
+  cannot realize is rejected with a specific reason, not a generic failure.
+- **Current (as found):** firmware 2.0's `P` command validation applies the
+  PIO 16.8-divider bound (≈ 4369 µs) to **both** generators, so markers mode
+  only worked for T_int ≤ ~4.37 ms; the driver mirrored that cap faithfully.
+  The UI preview swallowed the mirror's rejection and fell back to the
+  no-ramp numbers: the user saw plausible true values, then a generic
+  "Failed to apply configuration".
+- **Fixed (2026-09-27, app side):** the driver's ramp-dt bound is now
+  version-gated — `RAMP_DT_MAX_SOFT_US` (10 s) from firmware 2.1 on,
+  the 4369 µs cap for 2.0 and while not connected — enforced in
+  `calculate_ramp_timing` and `configure_ramp` against the *deployed*
+  firmware's truth; `HardwareManager.preview_timing` re-raises the mirror's
+  rejection instead of falling back; the timing window shows the specific
+  reason (`on_configuration_result(False, message)`).
+- **Firmware half fixed (2026-09-27):** `raspberry_copy/main.c` bumped to
+  **PICO2DAQ 2.1** — the `P` command now bounds dt by the general time
+  range (10 s) when the software generator is selected (2.0 wrongly applied
+  the PIO 16.8-divider bound to both generators; the PIO path keeps its
+  bound, and its `O` application path is untouched). Boards must be
+  reflashed to unlock long-integration markers mode; until then the driver
+  rejects large dt with the reason, and the workaround is ramp sampling
+  with T_int a multiple of dt. A consistency test pins the firmware
+  source's `FW_VERSION` against the driver's `RAMP_DT_LARGE_FW` gate.
+  Regression tests: `tests/test_pico_driver.py` (dt gate on 2.0 / 2.1 /
+  unconnected, `test_shipped_firmware_satisfies_the_large_dt_gate`),
+  `tests/test_timing_routing.py`
+  (`test_preview_rejection_is_raised_not_swallowed`).
+
 ---
 
 ## LOW

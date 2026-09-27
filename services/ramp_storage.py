@@ -42,6 +42,8 @@ from typing import Callable, List, Optional
 
 import numpy as np
 
+from core.constants import overflow_sentinel
+
 SAMPLE_DTYPE = np.dtype("<u4")
 BYTES_PER_SAMPLE = 4
 
@@ -264,13 +266,21 @@ class RampWindowExtractor:
     abandoned.  A window pair is emitted only when *every* channel completed
     that window (a window lost on one channel drops the pair — recorded,
     never silently misaligned).
+
+    With `pad_sentinel` (the overflow/missing-channel marker of the active
+    ADC), the emitted tuples always carry BOTH channel slots — a
+    single-detector setup fills the absent channel with the sentinel,
+    exactly like the µC drivers do — so `convert_data_debug` sees the same
+    shape regardless of the channel count.
     """
 
     def __init__(self, samples_per_window: int, channels: List[int],
-                 on_pairs: Callable[[list], None]):
+                 on_pairs: Callable[[list], None],
+                 pad_sentinel: Optional[int] = None):
         self.n = samples_per_window
         self.channels = list(channels)
         self.on_pairs = on_pairs
+        self.pad_sentinel = pad_sentinel
         self._completed = {ch: {} for ch in self.channels}  # w -> (first, last)
         self._partial = {ch: {} for ch in self.channels}    # w -> [first, last, count]
         self._cursor = 0
@@ -318,6 +328,13 @@ class RampWindowExtractor:
             self.window_pairs_dropped += len(self._completed[ch])
             self._completed[ch].clear()
 
+    def _emit_pair(self, pair_by_channel) -> None:
+        if self.pad_sentinel is None:
+            self.on_pairs([tuple(pair_by_channel[ch] for ch in self.channels)])
+            return
+        fill = (self.pad_sentinel, self.pad_sentinel)
+        self.on_pairs([tuple(pair_by_channel.get(ch, fill) for ch in (0, 1))])
+
     def _drain(self) -> None:
         while True:
             states = {ch: self._completed[ch].get(self._cursor, _MISSING)
@@ -325,9 +342,11 @@ class RampWindowExtractor:
             if _MISSING not in states.values():
                 # pop, don't peek: entries left behind would look like
                 # "later data" to the drop rule below and spin it forever
-                pair = tuple(self._completed[ch].pop(self._cursor)
-                             for ch in self.channels)
-                self.on_pairs([pair])
+                pair_by_channel = {
+                    ch: self._completed[ch].pop(self._cursor)
+                    for ch in self.channels
+                }
+                self._emit_pair(pair_by_channel)
                 self.windows_emitted += 1
                 self._cursor += 1
                 continue
@@ -433,7 +452,10 @@ class RampStorageService(_BlockSinkBase):
 
         self._sink_init(self.channels)
         self._extractor = RampWindowExtractor(
-            samples_per_window, self.channels, on_window_pairs
+            samples_per_window, self.channels, on_window_pairs,
+            # single-detector setups: pad the absent channel with the
+            # overflow sentinel, exactly like the µC drivers do
+            pad_sentinel=overflow_sentinel(metas[0].adc_bits),
         )
         self._writers = [
             RampChannelWriter(path, meta)
@@ -548,6 +570,7 @@ class RampPairExtractorService(_BlockSinkBase):
         channels: List[int],
         on_window_pairs: Callable[[list], None],
         overflow_policy: str = "block",
+        adc_bits: Optional[int] = None,
     ):
         self.samples_per_window = samples_per_window
         self.channels = list(channels)
@@ -555,7 +578,10 @@ class RampPairExtractorService(_BlockSinkBase):
 
         self._sink_init(self.channels)
         self._extractor = RampWindowExtractor(
-            samples_per_window, self.channels, on_window_pairs
+            samples_per_window, self.channels, on_window_pairs,
+            # absent channel sentinel-filled like the drivers (None = raw
+            # configured-channel tuples, for extractor-level unit tests)
+            pad_sentinel=overflow_sentinel(adc_bits) if adc_bits else None,
         )
         self._error: Optional[str] = None
         self._thread = threading.Thread(target=self._run, daemon=True,

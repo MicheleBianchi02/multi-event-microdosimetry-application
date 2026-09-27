@@ -73,32 +73,85 @@ class FakeTask:
         self.closed = True
 
 
-class FakeReader:
-    """Scripted reads: each entry is either a (nchannels, nsamples) volts
-    array or an exception instance to raise.  When the script is exhausted
-    the read waits until the task is stopped, then reports 0 samples."""
+class FakeReadTimeout(Exception):
+    """DAQmx read timeout (error -200284): armed, but no CONV_START edges."""
 
+    error_code = -200284
+
+
+class FakeReader:
+    """Stream-accurate fake of AnalogMultiChannelReader: `script` entries
+    (an exception to raise, or a (nchannels, nsamples) volts array) move
+    into an internal FIFO; fixed-count reads assemble exactly the requested
+    columns (leftovers stay buffered, like the real driver buffer), wait up
+    to `timeout` for data and raise FakeReadTimeout at the deadline;
+    READ_ALL_AVAILABLE (-1) drains whatever is buffered without waiting."""
+
+    READ_ALL = -1  # nidaqmx.constants.READ_ALL_AVAILABLE
     script = []
+    _buffered = []
     _lock = threading.Lock()
 
     def __init__(self, task_in_stream):
         self._task = task_in_stream
 
+    @classmethod
+    def reset(cls):
+        cls.script = []
+        cls._buffered = []
+
+    @classmethod
+    def _pull_script(cls):
+        with cls._lock:
+            while cls.script:
+                entry = cls.script.pop(0)
+                if isinstance(entry, Exception):
+                    raise entry
+                cls._buffered.append(entry)
+
+    @classmethod
+    def _available(cls):
+        return sum(entry.shape[1] for entry in cls._buffered)
+
+    def _assemble(self, data, want):
+        out = np.empty((data.shape[0], want), dtype=float)
+        taken = 0
+        while taken < want:
+            chunk = self._buffered[0]
+            take = min(want - taken, chunk.shape[1])
+            out[:, taken:taken + take] = chunk[:, :take]
+            taken += take
+            if take < chunk.shape[1]:
+                with self._lock:
+                    self._buffered[0] = chunk[:, take:]
+            else:
+                with self._lock:
+                    self._buffered.pop(0)
+        data[:, :want] = out
+        return want
+
     def read_many_sample(self, data, number_of_samples_per_channel, timeout=10.0):
-        while True:
-            with FakeReader._lock:
-                if FakeReader.script:
-                    entry = FakeReader.script.pop(0)
-                    break
+        if number_of_samples_per_channel == self.READ_ALL:
+            # like the real device: once the task stopped, the unread
+            # buffer is discarded — the drain must happen before it
             if self._task.stopped:
                 return 0
+            self._pull_script()
+            if not self._buffered:
+                return 0
+            return self._assemble(data, min(self._available(), data.shape[1]))
+
+        want = number_of_samples_per_channel
+        deadline = time.monotonic() + (timeout if timeout is not None else 10.0)
+        while True:
+            self._pull_script()
+            if self._task.stopped:
+                raise RuntimeError("task stopped")
+            if self._available() >= want:
+                return self._assemble(data, want)
+            if time.monotonic() >= deadline:
+                raise FakeReadTimeout("samples not yet available")
             time.sleep(0.001)
-        if isinstance(entry, Exception):
-            raise entry
-        data[:, :number_of_samples_per_channel] = entry[
-            :, :number_of_samples_per_channel
-        ]
-        return number_of_samples_per_channel
 
 
 class FakeDevice:
@@ -118,6 +171,29 @@ class FakeSystem:
         return FakeSystem
 
 
+class FakePhysicalChannel:
+    """Records dig_port_logic_family writes (the driver sets the shared
+    digital logic family to 3.3 V at connect)."""
+
+    instances = []
+    fail_on_family_set = False
+
+    def __init__(self, name):
+        self.name = name
+        self._family = None
+        FakePhysicalChannel.instances.append(self)
+
+    def _get_family(self):
+        return self._family
+
+    def _set_family(self, value):
+        if FakePhysicalChannel.fail_on_family_set:
+            raise RuntimeError("family not supported")
+        self._family = value
+
+    dig_port_logic_family = property(_get_family, _set_family)
+
+
 def _make_constants():
     module = types.ModuleType("nidaqmx.constants")
     import enum
@@ -134,9 +210,17 @@ def _make_constants():
         NRSE = 10078
         DIFF = 10106
 
+    class LogicFamily(enum.Enum):
+        ONE_POINT_EIGHT_V = 16184
+        TWO_POINT_FIVE_V = 14620
+        THREE_POINT_THREE_V = 14621
+        FIVE_V = 14619
+
     module.AcquisitionType = AcquisitionType
     module.Edge = Edge
     module.TerminalConfiguration = TerminalConfiguration
+    module.LogicFamily = LogicFamily
+    module.READ_ALL_AVAILABLE = -1
     return module
 
 
@@ -146,7 +230,9 @@ CONSTANTS = _make_constants()
 @pytest.fixture
 def fake_nidaqmx(monkeypatch):
     FakeTask.all_tasks.clear()
-    FakeReader.script = []
+    FakeReader.reset()
+    FakePhysicalChannel.instances.clear()
+    FakePhysicalChannel.fail_on_family_set = False
     FakeSystem.devices = [FakeDevice("NI6451")]
 
     root = types.ModuleType("nidaqmx")
@@ -156,6 +242,7 @@ def fake_nidaqmx(monkeypatch):
     readers.AnalogMultiChannelReader = FakeReader
     system = types.ModuleType("nidaqmx.system")
     system.System = FakeSystem
+    system.PhysicalChannel = FakePhysicalChannel
     errors = types.ModuleType("nidaqmx.errors")
 
     class DaqError(Exception):
@@ -303,6 +390,37 @@ def test_start_configures_task_channels_and_external_clock(fake_nidaqmx):
     assert task.stopped and task.closed
 
 
+def test_task_is_armed_before_start_measurement_returns(fake_nidaqmx):
+    """Alignment contract: when start_measurement returns, the task is
+    already armed — the caller may send the timing 'S' immediately and the
+    first CONV_START edge becomes the first sample of window 0."""
+    driver = make_driver()
+    sink = StubSink()
+    FakeReader.script = []
+    assert driver.start_measurement(make_session(), None, ramp_sink=sink)
+    assert FakeTask.all_tasks[-1].started is True
+    driver.stop_measurement()
+
+
+def test_read_timeout_tolerated_while_waiting_for_edges(fake_nidaqmx):
+    """Armed task, timing engine not started yet: reads time out and the
+    reader keeps waiting instead of failing the measurement."""
+    driver = make_driver()
+    driver.set_input_range(-5.0, 5.0)
+    sink = StubSink()
+    block = driver._block_size(1e6)
+
+    FakeReader.script = [
+        FakeReadTimeout("no edges yet"),
+        FakeReadTimeout("still no edges"),
+        np.stack([np.full(block, 0.0), np.full(block, 0.0)]),
+    ]
+    assert driver.start_measurement(make_session(), None, ramp_sink=sink)
+    assert _wait_for(lambda: len(sink.blocks) == 2)
+    assert driver.stop_measurement() is True  # timeouts were not an error
+    assert driver._error is False
+
+
 def test_reader_streams_converted_counts_with_indices(fake_nidaqmx):
     driver = make_driver()
     driver.set_input_range(-5.0, 5.0)
@@ -368,6 +486,160 @@ def test_read_error_flags_stop(fake_nidaqmx):
     time.sleep(0.3)  # let the reader hit the error
     assert driver._error is True
     assert driver.stop_measurement() is False
+
+
+# ------------------------------------------------- bug 3: logic family
+
+def test_connect_sets_33v_logic_family_on_pfi0(fake_nidaqmx):
+    """The Pico's CONV_START is 3.3 V; the 6451's shared digital logic
+    family defaults to 5 V (VIH >= 3.66 V — out of spec).  connect() must
+    set the family to 3.3 V on the clock's physical channel."""
+    driver = NIDAQmxAquisition(device_name="NI6451")
+    assert driver.connect() is True
+    (chan,) = FakePhysicalChannel.instances
+    assert chan.name == "NI6451/PFI0"
+    assert chan.dig_port_logic_family == CONSTANTS.LogicFamily.THREE_POINT_THREE_V
+
+
+def test_connect_fails_when_logic_family_cannot_be_set(fake_nidaqmx):
+    FakePhysicalChannel.fail_on_family_set = True
+    driver = NIDAQmxAquisition(device_name="NI6451")
+    assert driver.connect() is False  # never arm with an out-of-spec clock
+
+
+# ------------------------------------- bug 4b: block sizing, stop drain
+
+def test_block_size_and_read_timeout_scale_with_rate():
+    # markers mode at T_int = 100 ms -> 10 S/s: ONE sample per read (was
+    # 1024 -> ~102 s lumps), timeout ~10 block times, bounded to [0.5, 2] s
+    assert NIDAQmxAquisition._block_size(10.0) == 1
+    assert NIDAQmxAquisition._block_size(1e6) == 20_000
+    assert NIDAQmxAquisition._read_timeout_s(1, 10.0) == 1.0   # 10 block times
+    assert NIDAQmxAquisition._read_timeout_s(1, 5.0) == 2.0    # clamped at max
+    assert NIDAQmxAquisition._read_timeout_s(1, 100.0) == 0.5  # clamped at min
+    assert NIDAQmxAquisition._read_timeout_s(20_000, 1e6) == 0.5
+
+
+def test_stop_drains_the_buffered_tail_before_task_stop(fake_nidaqmx):
+    """Samples sitting unread in the DAQmx buffer must reach the sink
+    BEFORE task.stop() discards them (measurement rows in markers mode).
+    The fake discards its buffer once the task stopped, so this test only
+    passes if the driver drains first."""
+    driver = make_driver()
+    sink = StubSink()
+    block = driver._block_size(1e6)  # 20000
+    # one script entry with block + 500 columns: the run reads `block`,
+    # the remaining 500 land in the fake's buffer and are only retrievable
+    # via the READ_ALL_AVAILABLE drain
+    entry = np.stack([
+        np.arange(block + 500, dtype=np.float64),
+        np.arange(block + 500, dtype=np.float64) + 1000,
+    ])
+    FakeReader.script = [entry]
+
+    assert driver.start_measurement(make_session(), None, ramp_sink=sink)
+    assert _wait_for(lambda: len(sink.blocks) == 2)  # both channels, 1 block
+    assert driver.stop_measurement() is True
+
+    # the 500 buffered samples were delivered, contiguously, per channel
+    assert len(sink.blocks) == 4
+    ch, counts, idx = sink.blocks[2]
+    assert ch == 0 and idx == block and len(counts) == 500
+    ch, counts, idx = sink.blocks[3]
+    assert ch == 1 and idx == block and len(counts) == 500
+
+
+# --------------------------------------------- start ordering (regression)
+
+class FakeTimingDevice:
+    """Stands in for the Pico's timing role: records WHEN 'S' is sent and
+    whether the NI task was already armed at that moment (the 6451 ignores
+    CONV_START edges while not armed — arming late misaligns the whole
+    stream, see the window extractor's abs_index-0 contract)."""
+
+    def __init__(self):
+        self.calls = []
+        self.task_armed_at_start = None
+
+    def start_timing(self):
+        self.calls.append("S")
+        tasks = FakeTask.all_tasks
+        self.task_armed_at_start = bool(tasks and tasks[-1].started)
+        return True
+
+    def stop_timing(self):
+        self.calls.append("E")
+        return True
+
+
+class FakeManager:
+    def __init__(self, acquisition, timing):
+        self.acquisition = acquisition
+        self.timing = timing
+        self.calls = []
+
+    def start_timing_signal(self):
+        self.calls.append("timing_start")
+        return self.timing.start_timing()
+
+    def stop_timing_signal(self):
+        self.calls.append("timing_stop")
+        return self.timing.stop_timing()
+
+
+class FakeAcquisitionSpy:
+    def __init__(self, ok=True):
+        self.calls = []
+        self.ok = ok
+
+    def start_measurement(self, session, data_model, ramp_sink=None):
+        self.calls.append("start")
+        return self.ok
+
+    def stop_measurement(self):
+        self.calls.append("stop")
+        return True
+
+
+def test_acquisition_is_armed_before_timing_start(fake_nidaqmx):
+    """The real NI driver, driven through HardwareService exactly as the
+    measurement start does: by the time the timing engine's 'S' is sent,
+    the DAQmx task must be armed (regression: the timing used to start
+    first, so the stream began at an arbitrary window phase and every
+    start/stop pair was misaligned)."""
+    from services.hardware_service import HardwareService
+
+    driver = make_driver()
+    sink = StubSink()
+    FakeReader.script = []
+    timing = FakeTimingDevice()
+    manager = FakeManager(acquisition=driver, timing=timing)
+
+    service = HardwareService(manager, data_model=None, session_model=make_session())
+    assert service.start_receiving(simulate=False, ramp_sink=sink) is True
+    try:
+        assert timing.calls == ["S"]
+        assert timing.task_armed_at_start is True  # the core of the fix
+    finally:
+        service.stop_receiving(send_stop=True)
+
+    assert driver.stop_measurement() is True
+
+
+def test_timing_start_failure_stops_the_armed_acquisition(fake_nidaqmx):
+    """If the timing engine refuses to start, the armed acquisition must be
+    stopped again — otherwise the NI would sit armed forever with no clock."""
+    from services.hardware_service import HardwareService
+
+    spy = FakeAcquisitionSpy(ok=True)
+    timing = FakeTimingDevice()
+    timing.start_timing = lambda: False  # timing start fails
+    manager = FakeManager(acquisition=spy, timing=timing)
+
+    service = HardwareService(manager, data_model=None, session_model=make_session())
+    assert service.start_receiving(simulate=False) is False
+    assert service.has_error()
+    assert spy.calls == ["start", "stop"]  # armed, then cleaned up
 
 
 # ------------------------------------------------------ config-level tests

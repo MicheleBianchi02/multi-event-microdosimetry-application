@@ -746,7 +746,7 @@ class TimeWindow(QWidget):
 
         self.apply_configuration_requested.emit(config)
 
-    def on_configuration_result(self, success: bool):
+    def on_configuration_result(self, success: bool, message: str = None):
         if success:
             self.status_frame.setStyleSheet(
                 "background-color: #d4edda; border: 1px solid #c3e6cb; border-radius: 5px;"
@@ -765,7 +765,11 @@ class TimeWindow(QWidget):
                 "background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 5px;"
             )
             manager = self.hardware_manager
-            if manager is not None and manager.gain_state_unknown:
+            if message:
+                # the specific reason (e.g. the timing preview's rejection:
+                # markers mode with T_int beyond the firmware's dt cap)
+                self.status_label.setText(f"Error: {message}")
+            elif manager is not None and manager.gain_state_unknown:
                 self.status_label.setText(
                     "Error: gain apply failed — capacitor state unknown. "
                     "Fix the connection and re-apply the configuration."

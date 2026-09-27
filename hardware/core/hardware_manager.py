@@ -517,14 +517,30 @@ class HardwareManager:
     ) -> tuple:
         """True-values preview routed like configure_timing(); returns
         (ActualTiming | None, mode).  The marker/ramp previews come from
-        the driver's exact mirror (what the firmware's 'Q' reports)."""
+        the driver's exact mirror (what the firmware's 'Q' reports).
+
+        When the mirror REJECTS the request (e.g. markers mode with T_int
+        beyond the deployed firmware's ramp-dt cap) the ValueError is
+        re-raised — the caller must surface it.  Falling back to the
+        no-ramp numbers here would show values that can never be applied,
+        with only a generic failure at Apply time."""
         mode = self.timing_mode_for(sample_ramp)
-        actual = None
+
+        def ramp_preview(dt_us):
+            mirror = getattr(self.timing, "calculate_ramp_timing", None)
+            if mirror is None:
+                return None
+            try:
+                return mirror(dt_us, int_time_us, reset_time_us)
+            except ValueError as exc:
+                logger.error("timing preview rejected: %s", exc)
+                raise
+
         if mode == "ramp" and ramp_dt_us is not None:
-            actual = self.calculate_ramp_timing(ramp_dt_us, int_time_us, reset_time_us)
+            actual = ramp_preview(ramp_dt_us)
         elif mode == "markers":
-            actual = self.calculate_ramp_timing(int_time_us, int_time_us, reset_time_us)
-        if actual is None:
+            actual = ramp_preview(int_time_us)
+        else:
             actual = self.calculate_actual_timing(int_time_us, reset_time_us, period_us)
         return actual, mode
 

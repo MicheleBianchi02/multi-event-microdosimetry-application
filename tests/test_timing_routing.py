@@ -113,3 +113,42 @@ def test_marker_degenerate_ramp_gives_two_pulses():
     assert actual.int_time_us == pytest.approx(30.0)  # one interval, 2 edges
     # reset quantizes to the dt/10 tick (3 us at dt=30): 10 -> 9
     assert actual.reset_time_us == pytest.approx(9.0)
+
+
+def test_preview_rejection_is_raised_not_swallowed():
+    """A mirror that rejects the request (e.g. markers mode with T_int
+    beyond the deployed firmware's dt cap) must surface the reason: the
+    manager used to fall back to the no-ramp numbers, showing values that
+    can never be applied (generic failure at Apply time)."""
+
+    class LimitedTiming(StubTiming):
+        def calculate_ramp_timing(self, dt, int_us, reset_us):
+            if dt > 4369.0:
+                raise ValueError("ramp dt ... out of range")
+            return super().calculate_ramp_timing(dt, int_us, reset_us)
+
+    timing = LimitedTiming()
+    manager = make_manager(timing, StubAcquisition())
+
+    # markers mode with T_int = 100 ms -> dt = 100 ms -> rejected, raised
+    with pytest.raises(ValueError, match="out of range"):
+        manager.preview_timing(False, None, 100_000.0, 500.0)
+
+    # ramp mode with the same dt: raised too
+    with pytest.raises(ValueError):
+        manager.preview_timing(True, 100_000.0, 100_000.0, 500.0)
+
+    # and a representable markers request still previews normally
+    actual, mode = manager.preview_timing(False, None, 100.0, 20.0)
+    assert mode == "markers" and actual is not None
+
+
+def test_time_window_failure_message_is_backward_compatible():
+    """on_configuration_result gained an optional reason message; existing
+    callers (Apply path) keep working without it."""
+    import inspect
+
+    from views.time_window import TimeWindow
+
+    params = inspect.signature(TimeWindow.on_configuration_result).parameters
+    assert "message" in params and params["message"].default is None

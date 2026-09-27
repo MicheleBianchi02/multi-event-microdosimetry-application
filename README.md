@@ -189,7 +189,16 @@ disabled with an explanatory tooltip.
 > happens on a rising edge of the external **CONV_START** signal from the
 > timing device (PFI0, hardcoded), so "N = T_int/dt + 1 samples per
 > integration window" is a hardware guarantee — the driver only makes sense
-> in `ramp`/`markers` mode and refuses to start without a `ramp_sink`. The
+> in `ramp`/`markers` mode and refuses to start without a `ramp_sink`.
+> Start ordering is an alignment guarantee: `start_measurement` arms the
+> task before returning, and only then does the manager send the timing
+> 'S' — the 6451 ignores clock edges while not acquiring, so arming first
+> makes the first CONV_START edge after 'S' the first sample of window 0.
+> `connect()` sets the shared digital logic family to 3.3 V (the 5 V
+> default's guaranteed V_IH of 3.66 V would leave the Pico's clock out of
+> spec), reads use rate-adapted blocks with a bounded timeout, and stop
+> drains the DAQmx buffer before the task is stopped — no measurement rows
+> are stranded. The
 > config selects per channel only the *termination* (`differential` /
 > `rse`); the input terminals are fixed hardware facts hardcoded in the
 > driver (ch1 diff = AI0/AI8, ch2 diff = AI1/AI9, ch1 SE = AI2, ch2 SE =
@@ -424,7 +433,9 @@ then raw little-endian uint32; sequential writes — benchmarked far above the
 `samples_written` header watermark about once per second (crash recovery),
 and chunks the stream into integration windows (N = T_int/dt + 1, exact).
 The **first and last sample of every window** feed the classic start/stop
-pipeline unchanged. Ramp data is monitoring-only: the variance–covariance
+pipeline unchanged, always as two-channel tuples — a single-detector run
+fills the absent channel with the overflow sentinel, exactly like the µC
+drivers. Ramp data is monitoring-only: the variance–covariance
 analysis never sees it.
 
 **Markers mode (ramp sampling *not* requested on split hardware) writes no
