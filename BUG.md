@@ -140,7 +140,7 @@ Severity scale:
   mode switch goes through `HardwareManager.set_event_mode`, which calls it on
   every assigned gain controller.
 
-### B6 — ADC bit depth is hardcoded; should come from the acquisition interface — **PARTIALLY FIXED**
+### B6 — ADC bit depth is hardcoded; should come from the acquisition interface — **FIXED**
 - **Intended:** the number of ADC bits (and everything derived from it: histogram
   bins, overflow sentinel, sample validation) is dynamic and provided by
   `IDataAcquisition.get_adc_settings()`.
@@ -159,6 +159,19 @@ Severity scale:
   archive. Still hardcoded: `DataModel`'s histogram bins / overflow sentinel
   remain fixed at 12 bit — deriving them dynamically at session start is the
   remaining work.
+- **Fixed (2026-09-24):** the ADC context is dynamic end-to-end. `SessionModel.adc_bits`
+  (signal `adc_bits_changed`) is set at *Apply Configuration* from
+  `HardwareManager.get_adc_settings()` and at archive load from
+  `hardware_settings.adc.bits` (old `adc_num_bits` also honoured; legacy CSVs fall
+  back to 12 bit). `DataModel.configure_adc(bits)` sizes the histogram buffers and
+  defines the sentinel; the running window derives axis ranges, charge scaling and
+  ROI spinbox bounds from the live bin count (rebuilt on change); the simulator
+  scales to the active full scale. New sentinel convention: **2^bits** (one past
+  full scale, produced by the drivers and the simulator, mapped to NaN by the
+  conversion layer); `OVERFLOW_VALUE = 32768` remains only as the legacy
+  CSV-format-1 sentinel in `load_file`. `DataModel.configure_adc` rejects depths
+  above 20 bit (monitoring-only ramp data never enters the model).
+  Regression tests: `tests/test_adc_context.py`.
 
 ### B7 — Gain table is not constrained by the controller's GPIO capability — **FIXED**
 - **Intended:** the offered gain combinations depend both on the circuit (which
@@ -329,11 +342,15 @@ Severity scale:
   first line that has neither the timing header nor a `timestamp` prefix, so the
   marker can never be found; the fallback is "now".
 
-### B15 — Debug `stop_value` overflow handling differs between live and loaded data
+### B15 — Debug `stop_value` overflow handling differs between live and loaded data — **FIXED**
 - Live conversion replaces overflow with NaN in the returned stop array
   (`core/data_utils.py:45-46`); the file loader keeps the raw 32768 values in
   `result["stop_value"]` (`core/load_file.py:98`). Cosmetic inconsistency between
   live and reloaded debug sessions.
+- **Fixed (2026-09-24, with B6):** the loader now maps the sentinel of the loaded
+  archive's own ADC depth to NaN in the returned stop array, matching the live
+  conversion. Covered by `tests/test_adc_context.py`
+  (`test_load_legacy_csv_keeps_32768_sentinel`).
 
 ### B16 — Pico gain state cache assumes CH1 is always configured before CH2 — **FIXED**
 - `set_gpio_mask` offsets CH2's bits past `_ch1_mask_len`

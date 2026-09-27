@@ -38,7 +38,7 @@ class DummyAcquisition(IDataAcquisition):
     def arm(self) -> bool:
         return True
 
-    def start_measurement(self, session_model, data_model) -> bool:
+    def start_measurement(self, session_model, data_model, ramp_sink=None) -> bool:
         logger.info(
             "Dummy acquisition started: no data will be collected "
             "(virtual device, timing/gain bench test)."

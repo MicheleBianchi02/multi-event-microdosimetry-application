@@ -170,7 +170,7 @@ def split_config() -> dict:
     cfg["devices"]["ni_1"] = {
         "name": "NI readout",
         "driver": "ni_daqmx_v1",
-        "connection": {"type": "daqmx", "resource": "Dev1"},
+        "connection": {"type": "daqmx", "device": "Dev1"},
         "capabilities": {
             "acquisition": {
                 "num_channels": 2,

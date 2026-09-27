@@ -1,6 +1,7 @@
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from core.constants import (
+    DEFAULT_ADC_BITS,
     TX_DELAY_DEBUG_DOUBLE,
     TX_DELAY_DEBUG_SINGLE,
     TX_DELAY_PRO_DOUBLE,
@@ -19,6 +20,7 @@ class SessionModel(QObject):
     channel_mode_changed = pyqtSignal(bool)  # emits (multiple_channel)
     file_path_changed = pyqtSignal(str)
     workspace_changed = pyqtSignal(str)  # emits (active_workspace_dir)
+    adc_bits_changed = pyqtSignal(int)  # emits (adc_bits) — histogram geometry changes
 
     def __init__(self):
         super().__init__()
@@ -37,6 +39,10 @@ class SessionModel(QObject):
         # (ramp-sampling triggers), or 'markers' (integration-window markers
         # for an external digitizer = degenerate ramp with dt = int).
         self.timing_mode = "internal"
+        # Actual ramp-sampling interval (seconds) when timing_mode is
+        # 'ramp'; 0.0 otherwise.  The ramp files' header records it and the
+        # window extractor derives N = T_int/dt + 1 from it.
+        self.ramp_dt_s = 0.0
 
         self.baud_rate = 115200
         self.port = None
@@ -50,6 +56,12 @@ class SessionModel(QObject):
         self._increased_gain = False
         self.capacitance_pf_ch1 = 100.0
         self.capacitance_pf_ch2 = 100.0
+
+        # ADC resolution of the active context (B6): set from the loaded
+        # hardware configuration at Apply Configuration and from the archive
+        # settings at load time; DEFAULT_ADC_BITS for simulation/legacy.
+        # Drives histogram bins and the overflow sentinel app-wide.
+        self._adc_bits = DEFAULT_ADC_BITS
 
         # --- Workspace & Shift Setup Properties (Optional) ---
         from core.constants import APP_VERSION
@@ -93,6 +105,19 @@ class SessionModel(QObject):
     @single_event.setter
     def single_event(self, value):
         self._single_event = value
+
+    @property
+    def adc_bits(self) -> int:
+        """ADC resolution of the active context (hardware config or loaded
+        archive); see DataModel.configure_adc for the downstream effects."""
+        return self._adc_bits
+
+    @adc_bits.setter
+    def adc_bits(self, value: int):
+        value = int(value)
+        if value != self._adc_bits:
+            self._adc_bits = value
+            self.adc_bits_changed.emit(value)
 
     @property
     def increased_gain(self):

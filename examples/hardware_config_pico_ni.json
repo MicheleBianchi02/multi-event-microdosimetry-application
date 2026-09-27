@@ -1,0 +1,145 @@
+{
+    "schema_version": "1.0",
+    "devices": {
+        "pico_1": {
+            "name": "Pico 2 — timing + gain",
+            "driver": "pico_serial_v1",
+            "firmware_version": "2.0",
+            "connection": {
+                "type": "serial",
+                "baud_rate": 115200
+            },
+            "note": "Firmware PICO2DAQ 2.0. Generates the timing (integration/reset, ramp triggers on GP15 -> CONV_START) and switches the capacitors. No port here: auto-connect opens /dev/atomiqa/pico_1 (udev rule).",
+            "capabilities": {
+                "timing": {
+                    "integration_time_us": {
+                        "min": 5,
+                        "max": 10000000,
+                        "step": 1
+                    },
+                    "reset_time_us": {
+                        "min": 5,
+                        "max": 10000000,
+                        "step": 1
+                    },
+                    "period_us": null,
+                    "ramp_sampling": {
+                        "supported": true,
+                        "dt_us": {
+                            "min": 1,
+                            "max": 4360,
+                            "step": 1
+                        }
+                    }
+                },
+                "gain": {
+                    "pins": [
+                        17,
+                        18,
+                        19
+                    ],
+                    "note": "Same 3 pins routed to both boards (ganged gains)."
+                }
+            }
+        },
+        "ni_6451": {
+            "name": "NI USB-6451 — acquisition",
+            "driver": "ni_daqmx_v1",
+            "note": "20-bit, 1 MS/s/ch simultaneous. Clocked by CONV_START from the Pico (PFI0, rising edge). ch1 differential = AI0(+)/AI8(-); ch2 differential = AI1(+)/AI9(-). The 'device' field is the DAQmx device name.",
+            "connection": {
+                "type": "daqmx",
+                "device": "NI6451"
+            },
+            "capabilities": {
+                "acquisition": {
+                    "num_channels": 2,
+                    "adc": {
+                        "bits": 20,
+                        "input_ranges_volts": [
+                            { "min_volts": -10.0, "max_volts": 10.0 },
+                            { "min_volts": -5.0, "max_volts": 5.0 },
+                            { "min_volts": -2.5, "max_volts": 2.5 },
+                            { "min_volts": -0.2, "max_volts": 0.2 }
+                        ],
+                        "default_input_range_volts": { "min_volts": -5.0, "max_volts": 5.0 },
+                        "supports_oversampling": false
+                    }
+                }
+            }
+        }
+    },
+    "circuits": {
+        "board_ch1": {
+            "name": "Integrator board — detector 1",
+            "model": "ATOMIQA integrator rev. B",
+            "fixed_capacitance_pF": 22.0,
+            "switchable_capacitors": [
+                {
+                    "id": "c100",
+                    "value_pF": 100.0
+                },
+                {
+                    "id": "c560",
+                    "value_pF": 560.0
+                },
+                {
+                    "id": "c3300",
+                    "value_pF": 3300.0
+                }
+            ]
+        },
+        "board_ch2": {
+            "name": "Integrator board — detector 2",
+            "model": "ATOMIQA integrator rev. B",
+            "fixed_capacitance_pF": 0.0,
+            "switchable_capacitors": [
+                {
+                    "id": "c100",
+                    "value_pF": 100.0
+                }
+            ]
+        }
+    },
+    "channels": {
+        "ch1": {
+            "circuit": "board_ch1",
+            "termination": "differential"
+        },
+        "ch2": {
+            "circuit": "board_ch2",
+            "termination": "differential"
+        }
+    },
+    "roles": {
+        "timing": "pico_1",
+        "acquisition": "ni_6451",
+        "gain_ch1": "pico_1",
+        "gain_ch2": "pico_1"
+    },
+    "connections": [
+        {
+            "device": "pico_1",
+            "pin": 17,
+            "circuit": "board_ch1",
+            "capacitor": "c100"
+        },
+        {
+            "device": "pico_1",
+            "pin": 18,
+            "circuit": "board_ch1",
+            "capacitor": "c560"
+        },
+        {
+            "device": "pico_1",
+            "pin": 19,
+            "circuit": "board_ch1",
+            "capacitor": "c3300"
+        },
+        {
+            "device": "pico_1",
+            "pin": 17,
+            "circuit": "board_ch2",
+            "capacitor": "c100"
+        }
+    ]
+}

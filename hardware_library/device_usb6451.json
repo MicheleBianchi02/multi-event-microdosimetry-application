@@ -1,0 +1,30 @@
+{
+    "kind": "device",
+    "suggested_id": "ni_6451",
+    "label": "NI USB-6451 (acquisition, 2 ch simultaneous, 20 bit)",
+    "data": {
+        "name": "NI USB-6451",
+        "driver": "ni_daqmx_v1",
+        "note": "20-bit simultaneous digitizer, 1 MS/s per channel, clocked by the external CONV_START signal from the timing device (PFI0, rising edge, 3.3 V). Fixed input terminals (hardcoded in the driver): ch1 differential = AI0(+)/AI8(-), ch2 differential = AI1(+)/AI9(-), ch1 single-ended = AI2, ch2 single-ended = AI3; the config selects only the channel 'termination'. Out-of-range readings clamp (railing at full scale = overflow). 'device' is the DAQmx device name — rename the card in the DAQmx driver stack to match, not the file.",
+        "connection": {
+            "type": "daqmx",
+            "device": "NI6451"
+        },
+        "capabilities": {
+            "acquisition": {
+                "num_channels": 2,
+                "adc": {
+                    "bits": 20,
+                    "input_ranges_volts": [
+                        { "min_volts": -10.0, "max_volts": 10.0 },
+                        { "min_volts": -5.0, "max_volts": 5.0 },
+                        { "min_volts": -2.5, "max_volts": 2.5 },
+                        { "min_volts": -0.2, "max_volts": 0.2 }
+                    ],
+                    "default_input_range_volts": { "min_volts": -5.0, "max_volts": 5.0 },
+                    "supports_oversampling": false
+                }
+            }
+        }
+    }
+}

@@ -37,6 +37,7 @@ TIMING_PARAMETER_NAMES = ("integration_time_us", "reset_time_us", "period_us")
 VALID_CHANNEL_IDS = ("ch1", "ch2")
 VALID_ROLE_NAMES = ("timing", "acquisition", "gain_ch1", "gain_ch2")
 VALID_CAPABILITIES = ("timing", "gain", "acquisition")
+VALID_TERMINATIONS = ("differential", "rse")
 
 
 class ConfigValidationError(Exception):
@@ -437,10 +438,18 @@ def _parse_channels(raw: Any, errors: list) -> dict[str, ChannelConfig]:
             errors.append(f"{where}: must be an object")
             continue
         circuit = _required_str(ch_raw, "circuit", where, errors)
+        termination = ch_raw.get("termination")
+        if termination is not None and termination not in VALID_TERMINATIONS:
+            errors.append(
+                f"{where}.termination: {termination!r} is not one of "
+                f"{', '.join(VALID_TERMINATIONS)}"
+            )
+            termination = None
         channels[ch_id] = ChannelConfig(
             id=ch_id,
             circuit=circuit or "",
             adc_input=ch_raw.get("adc_input"),
+            termination=termination,
             note=ch_raw.get("note"),
         )
 
@@ -540,6 +549,15 @@ def _validate_semantics(config: HardwareConfig, errors: list, warnings: list) ->
                 f"persistent name is derived from the device id "
                 f"(/dev/atomiqa/{dev_id}); remove the field"
             )
+        # a DAQmx instrument names the device through its own driver stack:
+        # the config carries only that name (machine-independent)
+        if connection.get("type") == "daqmx":
+            dev_name = connection.get("device")
+            if not isinstance(dev_name, str) or not dev_name.strip():
+                errors.append(
+                    f"devices.{dev_id}.connection.device: required for a "
+                    f"'daqmx' connection (the DAQmx device name, e.g. 'NI6451')"
+                )
 
     # --- channels -> circuits ---
     circuit_users: dict[str, str] = {}
@@ -708,6 +726,27 @@ def _validate_against_registry(
                             f"native span {descriptor.adc_native_range} of driver "
                             f"{device.driver!r}"
                         )
+            if (
+                descriptor.acq_max_channels is not None
+                and device.acquisition.num_channels > descriptor.acq_max_channels
+            ):
+                errors.append(
+                    f"devices.{dev_id}.acquisition.num_channels: "
+                    f"{device.acquisition.num_channels} declared but driver "
+                    f"{device.driver!r} exposes at most {descriptor.acq_max_channels}"
+                )
+
+        # channel terminations of an acquisition-role driver: the driver maps
+        # (channel, termination) to fixed input terminals, so it must know
+        # the value
+        if config.roles.acquisition == dev_id and descriptor.channel_terminations:
+            for ch_id, channel in config.channels.items():
+                if channel.termination is not None and channel.termination not in descriptor.channel_terminations:
+                    errors.append(
+                        f"channels.{ch_id}.termination: {channel.termination!r} not "
+                        f"supported by acquisition driver {device.driver!r} "
+                        f"(valid: {', '.join(descriptor.channel_terminations)})"
+                    )
 
 
 def _check_timing_within(dev_id: str, declared: TimingCapability, hardcoded: TimingCapability, errors: list) -> None:

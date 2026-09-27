@@ -73,7 +73,7 @@ connection) accepts an optional free-text `"note"`.
 | `name` | Human-readable name, shown in the app and written into the archives. |
 | `driver` | Stable code selecting the communication implementation (`pico_serial_v1`, `pic_serial_v1`, `dummy_v1`). Must be known to the app. |
 | `firmware_version` | Optional, informational; recorded in the archives. |
-| `connection` | Transport: `type: "serial"` with `baud_rate`, or `type: "dummy"` for the virtual acquisition device. **No port**: the file stays machine-independent — the persistent name is derived from the device id (`/dev/atomiqa/<id>`, §5.1). A leftover `port` field from an older file is ignored with a warning. |
+| `connection` | Transport: `type: "serial"` with `baud_rate`, `type: "daqmx"` with `device` (the DAQmx device name of the NI card, e.g. `NI6451`), or `type: "dummy"` for the virtual acquisition device. **No port**: the file stays machine-independent — the serial persistent name is derived from the device id (`/dev/atomiqa/<id>`, §5.1), the NI card is identified by its name in the DAQmx driver stack. A leftover `port` field from an older file is ignored with a warning. |
 | `capabilities` | What this device can do in this setup. Declare a block only if the device is used for it. |
 
 A device is *usable* in a role only if it declares the matching capability
@@ -188,6 +188,15 @@ simply omits `ch2`** (and its gain role, circuit and wiring). `ch2` requires
 instrument-specific (e.g. the input terminal of a NI card); with the
 microcontrollers it is unnecessary and may be omitted.
 
+`termination` (optional, `"differential"` or `"rse"`) tells the acquisition
+device how the channel's signal reaches it — e.g. one channel differential
+and the other single-ended is legal. The *physical input pins* behind each
+choice are fixed hardware facts hardcoded in the driver: on the NI USB-6451,
+ch1 differential = AI0(+)/AI8(−), ch2 differential = AI1(+)/AI9(−), ch1
+single-ended = AI2, ch2 single-ended = AI3 (four different ADCs, so every
+mix samples simultaneously at 1 MS/s per channel). When omitted, the
+acquisition driver's default (`differential`) applies.
+
 ### 2.4 `roles` — who does what
 
 ```json
@@ -284,6 +293,7 @@ Shipped components:
 |---|---|
 | `device_pico2.json` | Raspberry Pi Pico 2 (firmware PICO2DAQ 2.0) — timing (int ≥ 5 µs, reset ≥ 5 µs, dt 1…4360 µs), gain (3 pins: GP17/18/19), acquisition (1 channel, 12 bit, 0…3.3 V). |
 | `device_pic.json` | PIC — timing (no ramp sampling), gain (1 pin), acquisition (2 channels, 12 bit, 0…5 V). |
+| `device_usb6451.json` | NI USB-6451 — acquisition only (DAQmx device `NI6451`): 2 simultaneous channels, 20 bit, ±0.2/±2.5/±5/±10 V (default ±5 V), clocked by the external CONV_START from the timing device. Combine with a timing µC (e.g. the Pico fragment without its acquisition block). |
 | `device_dummy_acquisition.json` | Virtual acquisition (`dummy_v1`): bench tests only, no data. |
 | `circuit_board_rev_b_ch1.json` | Integrator board rev. B: 22 pF fixed + 100/560/3300 pF switchable. |
 | `circuit_board_rev_b_ch2.json` | Integrator board rev. B: 100 pF switchable, no fixed. |
@@ -576,6 +586,53 @@ For bench tests of the timing and gain interfaces, the library offers a
 is fully valid and a measurement can be started — the app notifies clearly
 that **no data will be collected** — while the real timing signals and
 capacitor switching are verified on the bench.
+
+### 6.4 Ramp-sample files
+
+Measurements taken with *Sample Ramp* enabled additionally record the
+**voltage ramp itself**, not just the two integration-boundary samples.
+These files are large (2 channels × 1 MSPS × 4 B ≈ 29 GB/hour) and live
+**outside** the ZIP, in the campaign's `ramp/` folder:
+
+> Runs with *Sample Ramp* unchecked do **not** create these files. On split
+> hardware (µC times, NI acquires) the digitizer still works: it converts
+> exactly on the two integration-boundary edges per window, and those
+> start/stop values reach `data.csv` through the normal path — nothing is
+> duplicated on disk.
+
+```
+my_campaign/
+├── setup.json
+├── measurement_20260924T120000.zip
+└── ramp/
+    └── measurement_20260924T120000/     (suffix _1, _2… if the name exists)
+        ├── ch1.bin                       one binary file per channel
+        ├── ch2.bin
+        └── index.json                    totals, gaps, run diagnostics
+```
+
+- **Format** (`AQR1`, version 1): a fixed 4096-byte header followed by raw
+  ADC counts as little-endian 32-bit integers (the driver normalizes the
+  ADC's native resolution to 32 bit; the native bit depth is in the header).
+  The header records the actual timing (dt, period, samples per window),
+  ADC range, timing mode, driver/firmware versions, the hardware-config
+  fingerprint, a run uuid shared by the two channels and the number of
+  samples written.
+- **What they mean**: each integration window spans exactly
+  N = T_int/dt + 1 samples; sample *k* of window *w* sits at time
+  `w·period + k·dt` (nothing is sampled during reset). Counts→volts uses
+  the same conversion as `data.csv`, with the header's ADC bits and range.
+- **Provenance**: a rolling sha256 of each file's data section is computed
+  during the run and stored in the header at stop — no long re-read at save
+  time. `settings.json` of the ZIP gains a `ramp` section (folder name,
+  per-channel file names, sample counts, sha256s), so the pair
+  ZIP + `ramp/` folder stays linked while the ZIP alone remains fully
+  self-contained for the analysis.
+- **Robustness**: the sample watermark in each header is refreshed about
+  once per second, so a crashed run recovers up to its last whole window
+  (the workspace recovery flow does this automatically); dropped blocks are
+  recorded as gaps in `index.json` — the window alignment never shifts
+  silently.
 
 ---
 

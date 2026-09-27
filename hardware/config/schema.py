@@ -156,6 +156,12 @@ class ChannelConfig:
     id: str  # "ch1" or "ch2"
     circuit: str
     adc_input: Optional[str] = None
+    # How the channel's signal reaches the acquisition device:
+    # "differential" or "rse" (referenced single-ended).  None = the
+    # acquisition driver's default.  The concrete input terminals are
+    # hardware facts hardcoded in the driver (e.g. the NI USB-6451 maps
+    # ch1/ch2 x differential/rse to fixed AI pins).
+    termination: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -200,6 +206,11 @@ class DriverDescriptor:
     `timing` (and the gain/ADC limits) are the *hardcoded* layer-1 limits the
     driver enforces at every call; the config's declared envelope must lie
     within them (validated at load time).
+
+    Acquisition-side limits: `acq_max_channels` bounds the declared
+    `num_channels`, `acq_max_rate_hz` the per-channel stream rate (the ramp
+    dt must satisfy 1/dt <= rate), and `channel_terminations` the channel
+    termination values the driver can actually wire.
     """
 
     capabilities: frozenset  # subset of {"timing", "gain", "acquisition"}
@@ -207,6 +218,9 @@ class DriverDescriptor:
     gain_max_pins: Optional[int] = None
     adc_bits: Optional[int] = None
     adc_native_range: Optional[VoltageRange] = None
+    acq_max_channels: Optional[int] = None
+    acq_max_rate_hz: Optional[float] = None
+    channel_terminations: Optional[tuple] = None
 
     def supports(self, capability: str) -> bool:
         return capability in self.capabilities

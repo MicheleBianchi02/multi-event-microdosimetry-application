@@ -7,7 +7,7 @@ import numpy as np
 
 from hardware.interfaces import IDataAcquisition, ITimingController, IGainController, ActualTiming
 from hardware.config.schema import ParameterBounds, RampSamplingConfig, TimingCapability
-from core.constants import OVERFLOW_VALUE
+from core.constants import overflow_sentinel
 
 logger = logging.getLogger(__name__)
 
@@ -355,7 +355,12 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
                 response = self.serial.read(1)
         return self._check_response("D", response, "arm")
 
-    def start_measurement(self, session_model, data_model) -> bool:
+    def start_measurement(self, session_model, data_model, ramp_sink=None) -> bool:
+        # The legacy PIC firmware streams start/stop pairs only; it has no
+        # ramp-sample transport, so a sink here cannot be fed.
+        if ramp_sink is not None:
+            logger.error("start_measurement: this driver cannot stream ramp samples")
+            return False
         if not self.connect():
             return False
             
@@ -431,7 +436,9 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
     def _parse_debug_single(self, byte_buffer, data_model):
         start_value_ch1 = int.from_bytes(byte_buffer[0:2], byteorder="little")
         stop_value_ch1 = int.from_bytes(byte_buffer[2:4], byteorder="little")
-        data_model.append_data(((start_value_ch1, stop_value_ch1), (OVERFLOW_VALUE, OVERFLOW_VALUE)))
+        # App-side missing-channel marker: one past this ADC's full scale.
+        missing = overflow_sentinel(self.ADC_BITS)
+        data_model.append_data(((start_value_ch1, stop_value_ch1), (missing, missing)))
         byte_buffer.clear()
 
     def _parse_pro_double(self, byte_buffer, data_model):
@@ -442,7 +449,7 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
 
     def _parse_pro_single(self, byte_buffer, data_model):
         value_ch1 = int.from_bytes(byte_buffer[0:2], byteorder="little")
-        value_ch2 = OVERFLOW_VALUE
+        value_ch2 = overflow_sentinel(self.ADC_BITS)
         data_model.append_data((value_ch1, value_ch2))
         byte_buffer.clear()
 

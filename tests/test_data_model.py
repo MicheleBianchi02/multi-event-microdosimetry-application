@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.data_model import DataModel  # noqa: E402
-from core.constants import OVERFLOW_VALUE  # noqa: E402
+from core.constants import overflow_sentinel  # noqa: E402
 
 
 def test_operational_batch_returns_raw_data_despite_rois():
@@ -56,7 +56,7 @@ def test_operational_batch_returns_raw_data_despite_rois():
 
 def test_operational_batch_keeps_overflow_as_nan():
     dm = DataModel()
-    raw_batch = [(OVERFLOW_VALUE, 100)]
+    raw_batch = [(overflow_sentinel(12), 100)]  # one past the 12-bit full scale
 
     result = dm.ingest_raw_batch(
         raw_batch=raw_batch,

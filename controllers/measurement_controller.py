@@ -8,12 +8,19 @@ from PyQt6.QtCore import QObject, QTimer
 from PyQt6.QtWidgets import QMessageBox
 
 from core.calc_stat import calculate_results as calc_stat_results
-from core.constants import UPDATE_INTERVAL_MS
+from core.constants import DEFAULT_ADC_BITS, UPDATE_INTERVAL_MS
 from core.load_file import load_file
 from models.data_model import DataModel
 from models.session_model import SessionModel
 from services.analysis_service import AnalysisService
 from services.hardware_service import HardwareService
+from services.ramp_storage import (
+    RampFileMeta,
+    RampPairExtractorService,
+    RampStorageService,
+    publish_ramp_files,
+    ramp_temp_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +54,17 @@ class MeasurementController(QObject):
         self.starting_time = 0
         self.rate = None
         self._current_file = None
+
+        # Ramp/markers streaming state (services/ramp_storage.py): the sink
+        # handed to the acquisition driver, its temp paths and, after the
+        # stop, the finalized summary (published into workspace/ramp/ at
+        # save — ramp mode only: markers mode keeps everything in memory,
+        # its start/stop pairs land in data.csv like a classic run).
+        self._ramp_storage = None  # RampStorageService | RampPairExtractorService
+        self._ramp_files = False   # True only when binary files are written
+        self._ramp_paths = None
+        self._ramp_index_path = None
+        self._ramp_summary = None
 
         self.timer = QTimer()
         self.timer.timeout.connect(self._update_loop)
@@ -153,6 +171,21 @@ class MeasurementController(QObject):
             }
 
             hardware_manager = self.hardware.hardware_manager
+            # Ramp files first: their folder name goes into settings.json
+            # (published under <workspace>/ramp/, or beside the ZIP without
+            # a workspace).
+            ramp_meta = None
+            if self._ramp_summary is not None and self._ramp_files:
+                try:
+                    ramp_meta = self._publish_ramp_files(file_path)
+                except OSError:
+                    logger.exception("Failed to publish the ramp data files")
+                    QMessageBox.warning(
+                        self.main_window, "Ramp Data",
+                        "The ramp data files could not be moved into the "
+                        "ramp folder (they remain in the workspace as "
+                        "temporary files).",
+                    )
             success = DataExporter.export_to_zip(
                 session_model=self.session,
                 temp_csv_path=temp_csv,
@@ -164,6 +197,7 @@ class MeasurementController(QObject):
                     hardware_manager.config_text if hardware_manager.is_loaded else None
                 ),
                 setup_json_text=self._read_text(self._workspace_setup_file()),
+                ramp_meta=ramp_meta,
             )
             
             if success:
@@ -179,6 +213,9 @@ class MeasurementController(QObject):
                         ".active_run.csv.tmp",
                         ".active_run.hardware_config.json.tmp",
                         ".active_run.setup.json.tmp",
+                        ".active_run.ramp.ch1.bin",
+                        ".active_run.ramp.ch2.bin",
+                        ".active_run.ramp.index.json.tmp",
                     ):
                         tmp = os.path.join(self.session.active_workspace_dir, tmp_name)
                         if os.path.exists(tmp):
@@ -236,6 +273,10 @@ class MeasurementController(QObject):
         
         try:
             settings = result.get("settings")
+            # ADC resolution of the loaded archive (B6): drives the histogram
+            # bins and the overflow mapping; legacy files fall back to 12 bit.
+            self.session.adc_bits = int(result.get("adc_bits") or DEFAULT_ADC_BITS)
+            self.data_model.configure_adc(self.session.adc_bits)
             if settings:
                 # Extract timestamp from JSON
                 timestamp_iso = settings.get("measurement_info", {}).get("timestamp_start")
@@ -525,12 +566,20 @@ class MeasurementController(QObject):
         else:
             pass # Hardware device will be started in start_receiving
 
+        # ADC context of the upcoming measurement (B6): the config's bits were
+        # stored in the session at Apply Configuration; legacy/sim = 12 bit.
+        self.data_model.configure_adc(self.session.adc_bits)
         self.data_model.clear()
         self.timestamp = 0
         self.starting_time = time.time()
         self.session.timestamp_start = datetime.now().astimezone().isoformat()
         self.session.timestamp_end = None
         self.session.is_problematic = False
+        self._ramp_storage = None
+        self._ramp_files = False
+        self._ramp_summary = None
+        self._ramp_paths = None
+        self._ramp_index_path = None
 
         if getattr(self.session, 'active_workspace_dir', None) is None:
             self.running_view.already_saved = False
@@ -586,8 +635,35 @@ class MeasurementController(QObject):
                 self.running_view.already_saved = False
                 self.session.file_path = None
 
-        success = self.hardware.start_receiving(simulate=simulate, rate=self.rate)
+        # Ramp/markers mode: the acquisition driver streams sample blocks to
+        # a sink; the window extractor feeds the classic start/stop pipeline
+        # from the first/last sample of every window.  Ramp mode additionally
+        # saves the samples to disk (AQR1 files, published at save); markers
+        # mode keeps only the pairs — they land in data.csv like a classic
+        # run, nothing is written to .bin files.  Skipped for a virtual
+        # acquisition device (bench test: nothing is recorded).
+        ramp_sink = None
+        hw_mgr = self.hardware.hardware_manager
+        wants_ramp_stream = self.session.timing_mode in ("ramp", "markers") and (
+            simulate or not hw_mgr.acquisition_is_virtual
+        )
+        if wants_ramp_stream:
+            try:
+                ramp_sink = self._start_ramp_storage()
+            except OSError as exc:
+                logger.exception("Cannot create the ramp storage files")
+                QMessageBox.critical(
+                    self.running_view, "Error",
+                    f"Cannot create the ramp data files: {exc}",
+                )
+                return
+
+        success = self.hardware.start_receiving(
+            simulate=simulate, rate=self.rate, ramp_sink=ramp_sink
+        )
         if not success:
+            if ramp_sink is not None:
+                self._stop_ramp_storage(clean=False)
             QMessageBox.critical(
                 self.running_view, "Error", "Start command failed."
             )
@@ -607,12 +683,148 @@ class MeasurementController(QObject):
         self._update_loop(update_time=True)
         self.timer.start(UPDATE_INTERVAL_MS)
 
+    # ------------------------------------------------------------------
+    # Ramp-sample streaming (services/ramp_storage.py)
+    # ------------------------------------------------------------------
+
+    def _start_ramp_storage(self):
+        """Create the sink for the acquisition driver (or the simulator):
+        ramp mode -> temp binary files + writer thread; markers mode -> the
+        in-memory pair extractor (start/stop pairs only, nothing on disk —
+        they land in data.csv like a classic run)."""
+        session = self.session
+        hw_mgr = self.hardware.hardware_manager
+        mode = session.timing_mode
+        # markers mode is the degenerate ramp: dt = T_int -> exactly the
+        # two integration-boundary samples per window
+        dt_s = session.ramp_dt_s if mode == "ramp" else session.int_time
+        if dt_s <= 0 or session.int_time <= 0:
+            raise OSError("invalid timing configuration for ramp streaming")
+        n_per_window = int(round(session.int_time / dt_s)) + 1
+
+        if hw_mgr.is_loaded:
+            num_channels = len(hw_mgr.active_channels)
+        else:
+            num_channels = 2 if session.multiple_channel else 1
+
+        if mode == "markers":
+            self._ramp_files = False
+            self._ramp_paths = None
+            self._ramp_index_path = None
+            self._ramp_storage = RampPairExtractorService(
+                samples_per_window=n_per_window,
+                channels=list(range(num_channels)),
+                on_window_pairs=self._on_ramp_window_pairs,
+                overflow_policy="block",  # analysis data: never drop
+            )
+            return self._ramp_storage
+
+        self._ramp_files = True
+        paths, index_path = ramp_temp_paths(session.active_workspace_dir, num_channels)
+
+        adc = hw_mgr.get_adc_settings() if hw_mgr.is_loaded else {}
+        in_range = adc.get("input_range_volts") or {}
+        device = None
+        if hw_mgr.is_loaded and hw_mgr.config:
+            device = hw_mgr.config.devices.get(hw_mgr.config.roles.acquisition)
+
+        from uuid import uuid4
+
+        measurement_uuid = uuid4().hex
+        metas = [
+            RampFileMeta(
+                channel_index=i,
+                channel_label=f"ch{i + 1}",
+                adc_bits=session.adc_bits,
+                range_min_v=float(in_range.get("min_volts", float("nan"))),
+                range_max_v=float(in_range.get("max_volts", float("nan"))),
+                ramp_dt_s=dt_s,
+                period_s=session.period_s or (session.int_time + session.reset_time),
+                integration_time_s=session.int_time,
+                reset_time_s=session.reset_time,
+                samples_per_window=n_per_window,
+                timing_mode=mode,
+                driver_code=(device.driver if device else "simulation"),
+                firmware_version=(device.firmware_version if device else "") or "",
+                app_version=getattr(session, "app_version", "") or "",
+                config_sha256=(hw_mgr.config_sha256 if hw_mgr.is_loaded else "") or "",
+                measurement_uuid=measurement_uuid,
+                start_iso=session.timestamp_start or "",
+                start_epoch_s=self.starting_time,
+            )
+            for i in range(num_channels)
+        ]
+
+        self._ramp_storage = RampStorageService(
+            channel_paths=paths,
+            metas=metas,
+            index_path=index_path,
+            samples_per_window=n_per_window,
+            on_window_pairs=self._on_ramp_window_pairs,
+            # markers mode feeds the *analysis* stream: a lost block is a
+            # lost measurement row -> backpressure, never drop
+            overflow_policy="block" if mode == "markers" else "drop",
+        )
+        self._ramp_paths = paths
+        self._ramp_index_path = index_path
+        return self._ramp_storage
+
+    def _on_ramp_window_pairs(self, pairs: list):
+        """Window-boundary samples from the ramp extractor — the exact
+        debug-tuple shape the µC drivers emit; enters the classic pipeline
+        (buffer -> 50 ms update loop) unchanged.  Called from the storage
+        writer thread (append_batch is thread-safe)."""
+        self.data_model.append_batch(pairs)
+
+    def _stop_ramp_storage(self, clean: bool):
+        """Finalize the ramp sink after the acquisition stopped (clean) or
+        failed/was refused (aborted)."""
+        if self._ramp_storage is None:
+            return None
+        summary = self._ramp_storage.close(
+            state=1 if clean else 2
+        )
+        if summary.get("error"):
+            logger.error("Ramp storage: %s", summary["error"])
+        if summary.get("window_pairs_dropped"):
+            logger.warning(
+                "Ramp stream: %d measurement window pair(s) lost to gaps/drops",
+                summary["window_pairs_dropped"],
+            )
+        self._ramp_summary = summary
+        self._ramp_storage = None
+        return summary
+
+    def _publish_ramp_files(self, zip_path: str):
+        """Move the finalized temp ramp files into the campaign's ramp/
+        folder next to the saved ZIP; returns the settings.json section."""
+        workspace = getattr(self.session, "active_workspace_dir", None)
+        if workspace:
+            ramp_root = os.path.join(workspace, "ramp")
+        else:
+            ramp_root = os.path.join(os.path.dirname(zip_path), "ramp")
+        measurement_name = os.path.splitext(os.path.basename(zip_path))[0]
+        dest, ramp_meta = publish_ramp_files(
+            self._ramp_summary,
+            self._ramp_paths,
+            self._ramp_index_path,
+            ramp_root,
+            measurement_name,
+        )
+        self._ramp_summary = None  # published; do not publish twice
+        return ramp_meta
+
     def handle_stop_measurement(self):
         """
         Stops the hardware device from acquiring data and halts the UI update loop.
         """
         simulate = self.simulate
         response = self.hardware.stop_receiving(not simulate)
+
+        # Finalize the ramp temp files (clean stop -> finalized, failure ->
+        # aborted); they are published into workspace/ramp/ only at save.
+        if self._ramp_storage is not None:
+            self._stop_ramp_storage(clean=bool(response))
 
         if self.already_runned:
             self._update_loop(update_time=True)

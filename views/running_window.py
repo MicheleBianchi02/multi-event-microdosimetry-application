@@ -37,7 +37,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.constants import NUM_BINS
 from views.fft_analysis_dialog import FFTAnalysisDialog
 from views.info_dialog import InfoDialog
 
@@ -89,6 +88,9 @@ class RunningWindow(QWidget):
         self.init_variables()
         self.time_chart_type = "moving"
         self.init_ui()
+        # Histogram geometry follows the active ADC depth (B6): rebuilt
+        # whenever the configured bits change (config applied, archive loaded).
+        self.session.adc_bits_changed.connect(self._sync_mca_geometry)
 
     def init_variables(self):
         self.chart_type = "mc"
@@ -101,6 +103,24 @@ class RunningWindow(QWidget):
         self.calib_line = None
         self.calib_scatter = None
         self.detected_peaks = []
+
+    @property
+    def num_bins(self) -> int:
+        """Histogram bins of the active ADC (B6): follows the data model, so
+        axis ranges, charge scaling and ROI bounds all track the configured
+        ADC depth (4096 default, e.g. 65536 with a 16-bit digitizer)."""
+        return self.data_model.num_bins
+
+    def _sync_mca_geometry(self, *_args):
+        """Rebuild the MCA curves when the bin count changed after the plot
+        items were created (keep x axis and curve length consistent)."""
+        if getattr(self, "mca_item_ch1", None) is None:
+            return
+        if len(self.mca_x_axis) == self.num_bins + 1:
+            return
+        self.mca_x_axis = np.arange(self.num_bins + 1)
+        self.mca_item_ch1.setData(self.mca_x_axis, np.zeros(self.num_bins))
+        self.mca_item_ch2.setData(self.mca_x_axis, np.zeros(self.num_bins))
 
     def clear_plot(self):
         """Clears the underlying data model and refreshes the plots/dashboard to wipe previous state."""
@@ -470,10 +490,10 @@ class RunningWindow(QWidget):
                 self.view_time_btn.setChecked(True)
 
     def init_plot_items(self):
-        self.mca_x_axis = np.arange(NUM_BINS + 1)
+        self.mca_x_axis = np.arange(self.num_bins + 1)
         self.mca_item_ch1 = pg.PlotCurveItem(
             self.mca_x_axis,
-            np.zeros(NUM_BINS),
+            np.zeros(self.num_bins),
             pen=pg.mkPen(color="#0078d7", width=2),
             brush=pg.mkBrush(color="#0078d7"),
             stepMode=True,
@@ -482,7 +502,7 @@ class RunningWindow(QWidget):
         )
         self.mca_item_ch2 = pg.PlotCurveItem(
             self.mca_x_axis,
-            np.zeros(NUM_BINS),
+            np.zeros(self.num_bins),
             pen=pg.mkPen(color="#d9534f", width=2),
             brush=pg.mkBrush(color="#d9534f"),
             stepMode=True,
@@ -970,12 +990,12 @@ class RunningWindow(QWidget):
                         factor_ch1 = (
                             self.session.capacitance_pf_ch1
                             * self.setting_tab.adc_range
-                            / NUM_BINS
+                            / self.num_bins
                         ) ** 2
                         factor_ch2 = (
                             self.session.capacitance_pf_ch2
                             * self.setting_tab.adc_range
-                            / NUM_BINS
+                            / self.num_bins
                         ) ** 2
 
                         ch1_val = ch1_val * factor_ch1
@@ -1004,12 +1024,12 @@ class RunningWindow(QWidget):
                         factor_ch1 = (
                             self.session.capacitance_pf_ch1
                             * self.setting_tab.adc_range
-                            / NUM_BINS
+                            / self.num_bins
                         )
                         factor_ch2 = (
                             self.session.capacitance_pf_ch2
                             * self.setting_tab.adc_range
-                            / NUM_BINS
+                            / self.num_bins
                         )
 
                         ch1_val = ch1_val * factor_ch1
@@ -1240,8 +1260,8 @@ class RunningWindow(QWidget):
         if selected_channel == 1:
             return (
                 self.session.capacitance_pf_ch1 * self.setting_tab.adc_range
-            ) / NUM_BINS
-        return (self.session.capacitance_pf_ch2 * self.setting_tab.adc_range) / NUM_BINS
+            ) / self.num_bins
+        return (self.session.capacitance_pf_ch2 * self.setting_tab.adc_range) / self.num_bins
 
     def on_channel_roi_added(self, roi_widget):
         factor = self._get_channel_roi_factor(roi_widget.selected_channel)
@@ -1361,7 +1381,7 @@ class RunningWindow(QWidget):
         self.remove_overflow_marker()
         self.plot_widget.setLabel("left", "Counts")
         if self.setting_tab.show_type == self.setting_tab.CHANNEL:
-            self.plot_widget.setXRange(0, NUM_BINS + 1)
+            self.plot_widget.setXRange(0, self.num_bins + 1)
             self.plot_widget.setLabel("bottom", "Channel")
         elif self.setting_tab.show_type == self.setting_tab.CHARGE:
             max_charge = (
@@ -1409,7 +1429,7 @@ class RunningWindow(QWidget):
         if self.setting_tab.show_type == self.setting_tab.CHANNEL:
             self.plot_widget.setLabel("left", "Channel")
             self.plot_widget.setXRange(0, 1)
-            self.plot_widget.setYRange(0, NUM_BINS)
+            self.plot_widget.setYRange(0, self.num_bins)
         elif self.setting_tab.show_type == self.setting_tab.CHARGE:
             self.plot_widget.setLabel("left", "Charge [pC]")
             self.plot_widget.setXRange(0, 1)
@@ -1549,6 +1569,7 @@ class RunningWindow(QWidget):
             self.legend.removeItem(item)
 
     def show_mc(self):
+        self._sync_mca_geometry()
         if self.show_plt_log_y.isChecked():
             ch1_log = self.data_model.bar_data_ch1.astype(float)
             ch2_log = self.data_model.bar_data_ch2.astype(float)
@@ -1583,10 +1604,10 @@ class RunningWindow(QWidget):
                 self.session.capacitance_pf_ch2 * self.setting_tab.adc_range
             )
             self.mca_item_ch1.setData(
-                self.mca_x_axis / NUM_BINS * max_charge_ch1, ch1_log
+                self.mca_x_axis / self.num_bins * max_charge_ch1, ch1_log
             )
             self.mca_item_ch2.setData(
-                self.mca_x_axis / NUM_BINS * max_charge_ch2, ch2_log
+                self.mca_x_axis / self.num_bins * max_charge_ch2, ch2_log
             )
 
     def show_time(self):
@@ -1609,8 +1630,8 @@ class RunningWindow(QWidget):
             max_charge_ch2 = (
                 self.session.capacitance_pf_ch2 * self.setting_tab.adc_range
             )
-            factor_ch1 = max_charge_ch1 / NUM_BINS
-            factor_ch2 = max_charge_ch2 / NUM_BINS
+            factor_ch1 = max_charge_ch1 / self.num_bins
+            factor_ch2 = max_charge_ch2 / self.num_bins
 
         x = np.arange(start=start, stop=end)
         self.line_item_ch1.setData(
@@ -1652,7 +1673,9 @@ class RunningWindow(QWidget):
             self.start_line_item_ch2.setData(x=x, y=start_y2)
             self.stop_line_item_ch2.setData(x=x, y=stop_y2)
 
-    def show_overflow_marker(self, y_marker=NUM_BINS, start: int = 0, stop: int = 0):
+    def show_overflow_marker(self, y_marker=None, start: int = 0, stop: int = 0):
+        if y_marker is None:
+            y_marker = self.num_bins
         if self.setting_tab.show_type == self.setting_tab.CHARGE:
             max_charge = (
                 max(
@@ -1663,7 +1686,7 @@ class RunningWindow(QWidget):
                 )
                 * self.setting_tab.adc_range
             )
-            y_marker = y_marker / NUM_BINS * max_charge
+            y_marker = y_marker / self.num_bins * max_charge
 
         x_nan_ch1 = start + np.where(np.isnan(self.data_model.data[start:stop, 0]))[0]
         y_nan_ch1 = np.full(x_nan_ch1.shape, y_marker, dtype=float)
@@ -1764,17 +1787,17 @@ class RunningWindow(QWidget):
 
         max_charge = self.session.capacitance_pf_ch1 * self.setting_tab.adc_range
         set_item(0, 1, round(self.data_model.mean_value_ch1, 2))
-        set_item(0, 2, round(self.data_model.mean_value_ch1 / NUM_BINS * max_charge, 2))
+        set_item(0, 2, round(self.data_model.mean_value_ch1 / self.num_bins * max_charge, 2))
         set_item(0, 3, round(self.data_model.variance_ch1, 4))
         set_item(
-            0, 4, round(self.data_model.variance_ch1 * (max_charge / NUM_BINS) ** 2, 4)
+            0, 4, round(self.data_model.variance_ch1 * (max_charge / self.num_bins) ** 2, 4)
         )
         set_item(0, 5, round(np.sqrt(self.data_model.variance_ch1), 4))
         set_item(
             0,
             6,
             round(
-                np.sqrt(self.data_model.variance_ch1 * (max_charge / NUM_BINS) ** 2), 4
+                np.sqrt(self.data_model.variance_ch1 * (max_charge / self.num_bins) ** 2), 4
             ),
         )
         set_item(0, 7, round(covariance_ch1, 4))
@@ -1783,17 +1806,17 @@ class RunningWindow(QWidget):
 
         max_charge = self.session.capacitance_pf_ch2 * self.setting_tab.adc_range
         set_item(1, 1, round(self.data_model.mean_value_ch2, 2))
-        set_item(1, 2, round(self.data_model.mean_value_ch2 / NUM_BINS * max_charge, 2))
+        set_item(1, 2, round(self.data_model.mean_value_ch2 / self.num_bins * max_charge, 2))
         set_item(1, 3, round(self.data_model.variance_ch2, 4))
         set_item(
-            1, 4, round(self.data_model.variance_ch2 * (max_charge / NUM_BINS) ** 2, 4)
+            1, 4, round(self.data_model.variance_ch2 * (max_charge / self.num_bins) ** 2, 4)
         )
         set_item(1, 5, round(np.sqrt(self.data_model.variance_ch2), 4))
         set_item(
             1,
             6,
             round(
-                np.sqrt(self.data_model.variance_ch2 * (max_charge / NUM_BINS) ** 2), 4
+                np.sqrt(self.data_model.variance_ch2 * (max_charge / self.num_bins) ** 2), 4
             ),
         )
         set_item(1, 7, round(covariance_ch2, 4))
@@ -2645,12 +2668,15 @@ class ROIWidget(QGroupBox):
     delete_signal = pyqtSignal()
     update_signal = pyqtSignal()
     selected_channel: int = 1
-    start_value: int = int(NUM_BINS * 0.4)
-    stop_value: int = int(NUM_BINS * 0.6)
 
     def __init__(self, session_model) -> None:
         super().__init__()
         self.session = session_model
+        # ROI bounds span the active ADC's full scale (B6): 40%…60% default
+        # window, spinboxes bounded by the configured bin count.
+        self.num_bins = 2 ** getattr(session_model, "adc_bits", 12)
+        self.start_value: int = int(self.num_bins * 0.4)
+        self.stop_value: int = int(self.num_bins * 0.6)
         self.init_ui()
 
     def init_ui(self):
@@ -2684,7 +2710,7 @@ class ROIWidget(QGroupBox):
         row2.addWidget(QLabel("From"))
         self.start = QSpinBox()
         self.start.setFixedWidth(85)
-        self.start.setRange(0, NUM_BINS - 2)
+        self.start.setRange(0, self.num_bins - 2)
         self.start.setValue(self.start_value)
         self.start.valueChanged.connect(self.roi_changed)
         row2.addWidget(self.start)
@@ -2692,7 +2718,7 @@ class ROIWidget(QGroupBox):
         row2.addWidget(QLabel("To"))
         self.stop = QSpinBox()
         self.stop.setFixedWidth(85)
-        self.stop.setRange(1, NUM_BINS - 1)
+        self.stop.setRange(1, self.num_bins - 1)
         self.stop.setValue(self.stop_value)
         self.stop.valueChanged.connect(self.roi_changed)
         row2.addWidget(self.stop)

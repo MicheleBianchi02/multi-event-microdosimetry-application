@@ -3,11 +3,17 @@ from typing import List
 
 import numpy as np
 
-from core.constants import NUM_BINS
+from core.constants import DEFAULT_ADC_BITS, overflow_sentinel
 from core.data_utils import convert_data, convert_data_debug, filter_data_by_rois
 
 BUFFER_SIZE = 2**17
 BUFFER_SIZE_DEBUG = 2**17
+
+# Sanity bound on the dynamic ADC depth (B6): the histogram arrays are
+# 2^bits per channel, so bits beyond this would waste memory on bins no
+# detector resolution justifies.  (Ramp-monitoring samples never enter the
+# DataModel, so 32-bit ramp files are unaffected.)
+MAX_ADC_BITS = 20
 
 
 class DataModel:
@@ -22,14 +28,45 @@ class DataModel:
         self._data_buffer: List[tuple] = []
         self._lock = threading.Lock()
 
+        # ADC context (B6): bits/sentinel/bins are dynamic, set from the
+        # loaded hardware config at measurement start and from the archive
+        # settings at load time; 12 bit is the legacy/simulation fallback.
+        self._adc_bits = DEFAULT_ADC_BITS
+        self._num_bins = 2**DEFAULT_ADC_BITS
+
         self.init_variables()
+
+    @property
+    def adc_bits(self) -> int:
+        return self._adc_bits
+
+    @property
+    def num_bins(self) -> int:
+        return self._num_bins
+
+    @property
+    def overflow_sentinel(self) -> int:
+        return overflow_sentinel(self._adc_bits)
+
+    def configure_adc(self, bits: int) -> None:
+        """Set the ADC resolution of the upcoming measurement / loaded
+        archive: drives the histogram bins and the overflow sentinel.
+        Resets the histogram buffers (statistics arrays are untouched)."""
+        bits = int(bits)
+        if not 1 <= bits <= MAX_ADC_BITS:
+            raise ValueError(f"unsupported ADC resolution: {bits} bits")
+        self._adc_bits = bits
+        self._num_bins = 2**bits
+        with self._lock:
+            self.bar_data_ch1 = np.zeros(self._num_bins, dtype=int)
+            self.bar_data_ch2 = np.zeros(self._num_bins, dtype=int)
 
     def init_variables(self):
         with self._lock:
             self._data_buffer = []
 
-        self.bar_data_ch1 = np.zeros(NUM_BINS, dtype=int)
-        self.bar_data_ch2 = np.zeros(NUM_BINS, dtype=int)
+        self.bar_data_ch1 = np.zeros(self._num_bins, dtype=int)
+        self.bar_data_ch2 = np.zeros(self._num_bins, dtype=int)
         self.data = np.zeros((BUFFER_SIZE, 2), dtype=float)
         self.filtered_data = np.full((BUFFER_SIZE, 2), np.nan, dtype=float)
         self.start_data = np.zeros((BUFFER_SIZE_DEBUG, 2), dtype=float)
@@ -111,8 +148,8 @@ class DataModel:
 
     def reset_accumulators(self):
         with self._lock:
-            self.bar_data_ch1 = np.zeros(NUM_BINS, dtype=int)
-            self.bar_data_ch2 = np.zeros(NUM_BINS, dtype=int)
+            self.bar_data_ch1 = np.zeros(self._num_bins, dtype=int)
+            self.bar_data_ch2 = np.zeros(self._num_bins, dtype=int)
             self.mean_value_ch1 = 0.0
             self.mean_value_ch2 = 0.0
             self.variance_ch1 = 0.0
@@ -299,10 +336,12 @@ class DataModel:
         """
 
         if debug_mode:
-            start_value, stop_value, new_data = convert_data_debug(raw_batch)
+            start_value, stop_value, new_data = convert_data_debug(
+                raw_batch, sentinel=self.overflow_sentinel
+            )
             self.append_debug_measurements(start_value, stop_value)
         else:
-            new_data = convert_data(raw_batch)
+            new_data = convert_data(raw_batch, sentinel=self.overflow_sentinel)
 
         self.append_measurements(new_data)
 
@@ -639,14 +678,15 @@ class DataModel:
         raw_ch1 = new_data[:, 0]
         raw_ch2 = new_data[:, 1]
 
+        num_bins = self._num_bins
         ch1_indices = raw_ch1[~np.isnan(raw_ch1)].astype(int)
         ch2_indices = raw_ch2[~np.isnan(raw_ch2)].astype(int)
 
         # Clip to valid range to prevent np.bincount crash on negative/out-of-range values
-        ch1_indices = ch1_indices[(ch1_indices >= 0) & (ch1_indices < NUM_BINS)]
-        ch2_indices = ch2_indices[(ch2_indices >= 0) & (ch2_indices < NUM_BINS)]
+        ch1_indices = ch1_indices[(ch1_indices >= 0) & (ch1_indices < num_bins)]
+        ch2_indices = ch2_indices[(ch2_indices >= 0) & (ch2_indices < num_bins)]
 
         if len(ch1_indices) > 0:
-            self.bar_data_ch1 += np.bincount(ch1_indices, minlength=NUM_BINS)[:NUM_BINS]
+            self.bar_data_ch1 += np.bincount(ch1_indices, minlength=num_bins)[:num_bins]
         if len(ch2_indices) > 0:
-            self.bar_data_ch2 += np.bincount(ch2_indices, minlength=NUM_BINS)[:NUM_BINS]
+            self.bar_data_ch2 += np.bincount(ch2_indices, minlength=num_bins)[:num_bins]

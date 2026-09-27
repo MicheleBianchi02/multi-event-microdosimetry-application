@@ -234,7 +234,21 @@ class SetupController(QObject):
                 "ramp triggers while acquiring."
             )
             return False
+        # The acquisition device must be able to swallow the trigger rate:
+        # 1/dt <= the driver's per-channel stream limit (e.g. the USB-6451
+        # samples 1 MS/s per channel).
+        max_rate = hw_mgr.acquisition_max_rate_hz
+        if sample_ramp and max_rate is not None:
+            rate_hz = 1e6 / ramp_dt_us
+            if rate_hz > max_rate * (1.0 + 1e-9):
+                logger.error(
+                    "Ramp sampling rejected: dt = %.3g us implies %.6g S/s per "
+                    "channel, above the acquisition device limit of %.6g S/s",
+                    ramp_dt_us, rate_hz, max_rate,
+                )
+                return False
         self.session.timing_mode = hw_mgr.timing_mode_for(sample_ramp)
+        self.session.ramp_dt_s = (ramp_dt_us * 1e-6) if sample_ramp else 0.0
         success = hw_mgr.configure_timing(
             sample_ramp,
             ramp_dt_us,
@@ -266,6 +280,12 @@ class SetupController(QObject):
             if not hw_mgr.set_input_range(timer_params["input_range_min"], timer_params["input_range_max"]):
                 logger.error("set_input_range failed on the acquisition device")
                 return False
+
+        # ADC resolution of this setup (B6): bits from the loaded config
+        # drive the histogram bins and the overflow sentinel app-wide.
+        adc = hw_mgr.get_adc_settings()
+        if adc.get("bits"):
+            self.session.adc_bits = int(adc["bits"])
 
         return True
 

@@ -43,6 +43,18 @@ def _serial_factory(cls) -> Callable[[dict, DeviceConfig], Any]:
     return create
 
 
+def _daqmx_factory(cls) -> Callable[[dict, DeviceConfig], Any]:
+    def create(connection: dict, device_config: DeviceConfig) -> Any:
+        if connection.get("type") != "daqmx":
+            raise ValueError(
+                f"driver {cls.__name__} requires a 'daqmx' connection, "
+                f"got {connection.get('type')!r}"
+            )
+        return cls(device_name=connection.get("device", ""))
+
+    return create
+
+
 def _register(cls, code: str, factory: Callable[[dict, DeviceConfig], Any] = None) -> RegisteredDriver:
     descriptor = DriverDescriptor(
         capabilities=frozenset(cls.DRIVER_CAPABILITIES),
@@ -50,6 +62,9 @@ def _register(cls, code: str, factory: Callable[[dict, DeviceConfig], Any] = Non
         gain_max_pins=getattr(cls, "GAIN_MAX_PINS", None),
         adc_bits=getattr(cls, "ADC_BITS", None),
         adc_native_range=getattr(cls, "ADC_NATIVE_RANGE", None),
+        acq_max_channels=getattr(cls, "MAX_CHANNELS", None),
+        acq_max_rate_hz=getattr(cls, "MAX_RATE_HZ", None),
+        channel_terminations=getattr(cls, "CHANNEL_TERMINATIONS", None),
     )
     return RegisteredDriver(
         driver_class=cls,
@@ -62,6 +77,7 @@ def build_registry() -> dict[str, RegisteredDriver]:
     from hardware.pico.pico_daq import PicoSerialDAQ
     from hardware.pic.pic_daq import PICSerialDAQ
     from hardware.dummy.dummy_acquisition import DummyAcquisition
+    from hardware.ni.ni_daqmx import NIDAQmxAquisition
 
     registry = {
         "pico_serial_v1": _register(PicoSerialDAQ, "pico_serial_v1"),
@@ -73,6 +89,9 @@ def build_registry() -> dict[str, RegisteredDriver]:
         factory=lambda connection, device_config: DummyAcquisition(
             device_config.acquisition if device_config else None
         ),
+    )
+    registry["ni_daqmx_v1"] = _register(
+        NIDAQmxAquisition, "ni_daqmx_v1", factory=_daqmx_factory(NIDAQmxAquisition)
     )
     return registry
 

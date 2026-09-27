@@ -115,6 +115,21 @@ class HardwareManager:
         self.gain_ch1 = self.devices.get(config.roles.gain_ch1)
         self.gain_ch2 = self.devices.get(config.roles.gain_ch2)
 
+        # Instrument-style acquisition drivers map the config's channels
+        # (with their termination) onto fixed input terminals; µC drivers
+        # no-op (firmware with fixed inputs).  Missing termination defaults
+        # to differential.
+        if self.acquisition is not None and hasattr(self.acquisition, "configure_channels"):
+            channel_plan = [
+                (ch_id, ch.termination or "differential")
+                for ch_id, ch in config.channels.items()
+            ]
+            try:
+                if not self.acquisition.configure_channels(channel_plan):
+                    logger.error("The acquisition driver rejected the channel plan %s", channel_plan)
+            except Exception:
+                logger.exception("configure_channels failed on the acquisition device")
+
         self.gain_model_ch1 = build_channel_gain_model(config, "ch1")
         self.gain_model_ch2 = build_channel_gain_model(config, "ch2")
         self._selected_gain = {"ch1": None, "ch2": None}
@@ -173,6 +188,19 @@ class HardwareManager:
         """True when the acquisition role is a dummy device (bench tests of
         the timing/gain interfaces; no data is collected)."""
         return bool(getattr(self.acquisition, "IS_VIRTUAL", False))
+
+    @property
+    def acquisition_max_rate_hz(self) -> Optional[float]:
+        """Per-channel stream-rate limit of the acquisition driver (from its
+        registry descriptor), used to gate the ramp dt at apply time:
+        1/dt must not exceed it.  None = the driver declares no limit."""
+        if self.config and self.acquisition is not None:
+            device = self.config.devices.get(self.config.roles.acquisition)
+            if device is not None:
+                registered = DRIVER_REGISTRY.get(device.driver)
+                if registered is not None:
+                    return registered.descriptor.acq_max_rate_hz
+        return None
 
     @property
     def can_ramp_while_acquiring(self) -> bool:

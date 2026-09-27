@@ -35,7 +35,7 @@ import time
 
 import serial
 
-from core.constants import OVERFLOW_VALUE
+from core.constants import overflow_sentinel
 from hardware.config.schema import (
     ParameterBounds,
     RampSamplingConfig,
@@ -619,7 +619,14 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
         )
         return False
 
-    def start_measurement(self, session_model, data_model) -> bool:
+    def start_measurement(self, session_model, data_model, ramp_sink=None) -> bool:
+        # The Pico's single ADC cannot acquire while it generates ramp
+        # triggers (SUPPORTS_RAMP_WHILE_ACQUIRING = False) — the manager
+        # refuses that combination long before reaching this point; a sink
+        # here would be a wiring bug.
+        if ramp_sink is not None:
+            logger.error("start_measurement: this driver cannot stream ramp samples")
+            return False
         if self.is_measuring:
             logger.error("start_measurement refused: a measurement is already running")
             return False
@@ -691,6 +698,9 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
 
     def _read_loop(self, session, data_model):
         debug_mode = bool(getattr(session, "debug_mode", True))
+        # App-side overflow/missing-channel marker: one past this ADC's full
+        # scale (mapped to NaN by the conversion layer).
+        missing = overflow_sentinel(self.ADC_BITS)
         byte_buffer = bytearray()
         batch = []
         try:
@@ -729,10 +739,10 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
                     del byte_buffer[:4]
                     self._words_read += 1
                     if debug_mode:
-                        batch.append(((start, stop), (OVERFLOW_VALUE, OVERFLOW_VALUE)))
+                        batch.append(((start, stop), (missing, missing)))
                     else:
-                        diff = stop - start if stop >= start else OVERFLOW_VALUE
-                        batch.append((diff, OVERFLOW_VALUE))
+                        diff = stop - start if stop >= start else missing
+                        batch.append((diff, missing))
                     if len(batch) >= READER_BATCH:
                         data_model.append_batch(batch)
                         batch = []

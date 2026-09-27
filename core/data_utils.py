@@ -1,10 +1,12 @@
 import numpy as np
 from numpy.typing import NDArray
 
-from core.constants import OVERFLOW_VALUE
+from core.constants import DEFAULT_ADC_BITS, overflow_sentinel
 
 
-def convert_data(data: list[tuple[int, int]]) -> NDArray:
+def convert_data(
+    data: list[tuple[int, int]], sentinel: int | None = None
+) -> NDArray:
     """
     Converts a list of tuples from the serial device into a float numpy array,
     replacing overflow values with NaN.
@@ -13,19 +15,25 @@ def convert_data(data: list[tuple[int, int]]) -> NDArray:
     ----------
     data : list of tuple of (int, int)
         The raw measurements.
+    sentinel : int, optional
+        Overflow / missing-channel marker of the active ADC
+        (see overflow_sentinel); defaults to the 12-bit fallback.
 
     Returns
     -------
     NDArray
         The converted array of shape (N, 2).
     """
+    if sentinel is None:
+        sentinel = overflow_sentinel(DEFAULT_ADC_BITS)
     arr = np.array(data, dtype=float)
-    arr[arr == OVERFLOW_VALUE] = np.nan
+    arr[arr == sentinel] = np.nan
     return arr
 
 
 def convert_data_debug(
     data: list[tuple[tuple[int, int], tuple[int, int]]],
+    sentinel: int | None = None,
 ) -> tuple[NDArray, NDArray, NDArray]:
     """
     Converts debug-formatted raw data into start, stop, and difference arrays.
@@ -34,20 +42,24 @@ def convert_data_debug(
     ----------
     data : list of tuple of (tuple of (int, int), tuple of (int, int))
         The raw debug measurements containing start and stop tuples.
+    sentinel : int, optional
+        Overflow / missing-channel marker of the active ADC
+        (see overflow_sentinel); defaults to the 12-bit fallback.
 
     Returns
     -------
     tuple of (NDArray, NDArray, NDArray)
         A tuple containing (start_values, stop_values, difference).
     """
+    if sentinel is None:
+        sentinel = overflow_sentinel(DEFAULT_ADC_BITS)
     start_values = np.array([[a, c] for (a, b), (c, d) in data], dtype=float)
-    start_values[start_values == OVERFLOW_VALUE] = np.nan
+    start_values[start_values == sentinel] = np.nan
     stop_values = np.array([[b, d] for (a, b), (c, d) in data], dtype=float)
-    stop_values[stop_values == OVERFLOW_VALUE] = np.nan
+    stop_values[stop_values == sentinel] = np.nan
 
     new_data = stop_values - start_values
     new_data[new_data < 0] = np.nan
-    new_data[new_data == OVERFLOW_VALUE] = np.nan
 
     return start_values, stop_values, new_data
 

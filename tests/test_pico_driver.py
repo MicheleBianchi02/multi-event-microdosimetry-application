@@ -11,8 +11,12 @@ import types
 
 import pytest
 
-from core.constants import OVERFLOW_VALUE
+from core.constants import overflow_sentinel
 from hardware.pico.pico_daq import PicoSerialDAQ, STREAM_MARKER, SYS_CLK_MHZ
+
+# App-side missing-channel marker the driver fills for the unacquired CH2:
+# one past the 12-bit full scale (mapped to NaN by the conversion layer).
+MISSING = overflow_sentinel(12)
 
 IDENTITY = b"V PICO2DAQ 2.0 F4D87D3B6FBAEF13 150\n"
 STATUS = (b"Q run=0 mode=noramp int=1000.000 reset=20.000 dt=10.000 "
@@ -330,9 +334,9 @@ def test_start_stop_streams_all_samples(fake, driver):
     fake._data_words = words
     data_model = run_and_stop(driver, words)
     assert data_model.samples == [
-        ((100, 200), (OVERFLOW_VALUE, OVERFLOW_VALUE)),
-        ((300, 250), (OVERFLOW_VALUE, OVERFLOW_VALUE)),
-        ((4000, 4095), (OVERFLOW_VALUE, OVERFLOW_VALUE)),
+        ((100, 200), (MISSING, MISSING)),
+        ((300, 250), (MISSING, MISSING)),
+        ((4000, 4095), (MISSING, MISSING)),
     ]
     # stop consumed the marker and the ack
     assert fake.commands == ["V", "S", "E", "Q"]
@@ -345,8 +349,8 @@ def test_operational_mode_derives_diff(fake, driver):
     fake._data_words = words
     data_model = run_and_stop(driver, words, debug=False)
     assert data_model.samples == [
-        (100, OVERFLOW_VALUE),
-        (OVERFLOW_VALUE, OVERFLOW_VALUE),
+        (100, MISSING),
+        (MISSING, MISSING),
     ]
 
 
@@ -359,7 +363,7 @@ def test_reader_realigns_after_garbage_byte(fake, driver):
     # inject the stray byte after the S ack (already queued by the fake)
     driver.serial._rx.insert(1, 0xAB)
     assert driver.stop_measurement() is True
-    assert data_model.samples == [((10, 20), (OVERFLOW_VALUE, OVERFLOW_VALUE))]
+    assert data_model.samples == [((10, 20), (MISSING, MISSING))]
     assert driver._resync_drops == 1
 
 

@@ -158,6 +158,11 @@ class ShiftService:
         workspace = getattr(session_model, "active_workspace_dir", None)
         return os.path.join(workspace, name) if workspace else name
 
+    # Ramp-sample temp files of a crashed run (services/ramp_storage.py):
+    # recovered like the CSV — trimmed to the header watermark and moved
+    # into the ramp folder beside the recovered ZIP.
+    RAMP_TMP_NAMES = (".active_run.ramp.ch1.bin", ".active_run.ramp.ch2.bin")
+
     @staticmethod
     def check_for_recovery(folder_path: str) -> bool:
         """Checks if there are orphaned temp files in the given workspace directory."""
@@ -200,6 +205,7 @@ class ShiftService:
                         zf.write(tmp, arc_name)
             os.remove(csv_tmp)
             os.remove(json_tmp)
+            ShiftService._recover_ramp_files(folder_path, save_path)
             QMessageBox.information(
                 parent_widget, "Success", "Measurement data recovered and saved successfully!"
             )
@@ -208,3 +214,59 @@ class ShiftService:
             logger.exception("Failed to recover data")
             QMessageBox.critical(parent_widget, "Error", f"Failed to recover data: {e}")
             return False
+
+    @staticmethod
+    def _recover_ramp_files(folder_path: str, zip_path: str) -> None:
+        """Best-effort recovery of crashed ramp temp files: trim each to its
+        header watermark (whole windows), mark it aborted, and move it into
+        <workspace>/ramp/<recovered zip stem>/ beside the recovered archive."""
+        from services.ramp_storage import publish_ramp_files, recover_ramp_file
+
+        ramp_tmps = [
+            os.path.join(folder_path, name)
+            for name in ShiftService.RAMP_TMP_NAMES
+            if os.path.exists(os.path.join(folder_path, name))
+        ]
+        if not ramp_tmps:
+            return
+
+        summary_channels = {}
+        first_header = None
+        for path in ramp_tmps:
+            header = recover_ramp_file(path)
+            if header is None:
+                os.remove(path)
+                continue
+            if first_header is None:
+                first_header = header
+            summary_channels[header["channel_label"]] = {
+                "file": os.path.basename(path),
+                "samples": header["samples_written"],
+                "sha256_data": "",  # aborted: no rolling hash was finalized
+                "dropped_blocks": 0,
+                "gaps": [],
+                "windows_completed": 0,
+                "window_pairs_dropped": 0,
+            }
+        if not summary_channels or first_header is None:
+            return
+
+        index_tmp = os.path.join(folder_path, ".active_run.ramp.index.json.tmp")
+        summary = {
+            "format": "atomiqa-ramp-index/1",
+            "measurement_uuid": first_header["measurement_uuid"],
+            "timing_mode": first_header["timing_mode"],
+            "ramp_dt_s": first_header["ramp_dt_s"],
+            "period_s": first_header["period_s"],
+            "samples_per_window": first_header["samples_per_window"],
+            "state": 2,  # aborted (crash recovery)
+            "channels": summary_channels,
+        }
+        name = os.path.splitext(os.path.basename(zip_path))[0]
+        ramp_root = os.path.join(folder_path, "ramp")
+        try:
+            publish_ramp_files(
+                summary, ramp_tmps, index_tmp, ramp_root, name
+            )
+        except OSError:
+            logger.exception("Ramp files could not be moved during recovery")

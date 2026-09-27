@@ -23,3 +23,6 @@ dist/
 
 # Pico firmware working copy (lives in its own repository; local only)
 raspberry_copy/
+
+# Local reference material (NI USB-6451 manuals, nidaqmx-python clone) — not part of the app
+temp/

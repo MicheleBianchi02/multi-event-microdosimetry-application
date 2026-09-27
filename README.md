@@ -178,10 +178,28 @@ disabled with an explanatory tooltip.
 
 | Method | Contract |
 |---|---|
-| `start_measurement(session_model, data_model)` | Start the stream. The driver owns its reader thread and appends converted samples directly to `data_model`. |
+| `start_measurement(session_model, data_model, ramp_sink=None)` | Start the stream. The driver owns its reader thread and appends converted samples directly to `data_model`. `ramp_sink` is non-None only in ramp/markers timing mode: the driver then pushes blocks of normalized uint32 samples (raw ADC counts, with absolute sample indices) to it from its reader thread (protocol: `hardware/interfaces/ramp_sink.py`); drivers that cannot stream ramp samples refuse to start. |
 | `stop_measurement()` | Stop the stream and join the reader thread. |
+| `configure_channels(channel_plan)` | Optional: `(channel_id, termination)` pairs for the active channels, derived from the config by the `HardwareManager`. No-op on drivers with fixed firmware inputs; instrument drivers map the pairs onto physical input terminals. |
 | `set_input_range(min_volts, max_volts)` | Set the ADC voltage input range (for instruments supporting selectable ranges). |
 | `get_adc_settings()` | Properties of the ADC. The authoritative values come from the loaded hardware config (`HardwareManager.get_adc_settings()`: bits, effective input range, channel count); the archived snapshot is used when re-loading a measurement. |
+
+> The **NI driver** (`ni_daqmx_v1`, `hardware/ni/ni_daqmx.py`) acquires on a
+> NI USB-6451 (20-bit, 1 MS/s per channel simultaneous): every conversion
+> happens on a rising edge of the external **CONV_START** signal from the
+> timing device (PFI0, hardcoded), so "N = T_int/dt + 1 samples per
+> integration window" is a hardware guarantee — the driver only makes sense
+> in `ramp`/`markers` mode and refuses to start without a `ramp_sink`. The
+> config selects per channel only the *termination* (`differential` /
+> `rse`); the input terminals are fixed hardware facts hardcoded in the
+> driver (ch1 diff = AI0/AI8, ch2 diff = AI1/AI9, ch1 SE = AI2, ch2 SE =
+> AI3 — four different ADCs, so any mix is simultaneous). Readings outside
+> the applied range simply clamp: railing at ±full scale is the overflow
+> indication. The DAQmx device name lives in the config
+> (`connection.device`, e.g. `NI6451`); the `nidaqmx` package is imported
+> lazily so machines without it still load configs (the driver tests run
+> against a fake `nidaqmx` module; live validation needs the DAQmx runtime
+> and the card).
 
 > The Pico driver (`pico_serial_v1`) implements the **PICO2DAQ 2.0**
 > firmware protocol, documented in
@@ -394,10 +412,53 @@ Plain CSV files with the timing parameters encoded in the header line
 simple `timestamp…` header; 3 or 5 data columns; the overflow sentinel is 32768.
 Loaded for offline analysis only.
 
-### 4.4 Ramp samples
+### 4.4 Ramp samples (file format AQR1, version 1)
 
-Not saved yet: the timing triggers for ramp sampling can be configured, but the
-acquisition and storage of the ramp samples is future work (§6).
+When a measurement runs with ramp sampling enabled, the ramp
+stream bypasses `DataModel` almost entirely: the acquisition driver (or the
+simulator) pushes blocks of normalized **uint32** ADC counts per channel into
+a `RampStorageService` (`services/ramp_storage.py`), whose single writer
+thread appends them to one binary file per channel (fixed 4096-byte header,
+then raw little-endian uint32; sequential writes — benchmarked far above the
+8 MiB/s spec), keeps a rolling sha256 of the data section, refreshes the
+`samples_written` header watermark about once per second (crash recovery),
+and chunks the stream into integration windows (N = T_int/dt + 1, exact).
+The **first and last sample of every window** feed the classic start/stop
+pipeline unchanged. Ramp data is monitoring-only: the variance–covariance
+analysis never sees it.
+
+**Markers mode (ramp sampling *not* requested on split hardware) writes no
+files at all**: the timing device emits the two integration-boundary edges
+per window (dt = T_int), the same window extraction turns them into the
+classic start/stop pairs (`RampPairExtractorService`, in memory), and those
+land in `data.csv` exactly like a µC-run's debug stream — binary files would
+only duplicate `data.csv`, so none are created and the archive carries no
+`ramp` section.
+
+At save time the temp files (`.active_run.ramp.*` in the workspace) move into
+the campaign's ramp folder (existence-checked, suffixed `_1`, `_2`… on name
+collision):
+
+```
+workspace/
+├── measurement_xxx.zip          (unchanged; settings.json gains a "ramp"
+│                                 section referencing the folder + sha256s)
+└── ramp/measurement_xxx/
+    ├── ch1.bin, ch2.bin         (header + raw uint32 samples)
+    └── index.json               (per-channel totals, gaps, uuid)
+```
+
+Each header records the actual timing (dt, period, N), ADC bits and input
+range, timing mode, driver/firmware, the hardware-config sha256, a
+measurement uuid shared by the two channels, the sample watermark, a
+finalized/aborted flag and (once finalized) the data sha256. Reading is
+`np.memmap(path, dtype="<u4", offset=4096)` via `open_ramp_file()`. A window
+lost to a dropped block is recorded as a gap (whole-block granularity) and
+never silently misaligned. Crash recovery trims each file to its last whole
+window at the watermark (`recover_ramp_file`, wired into the workspace
+recovery flow).
+
+The custom monitoring/FFT UI for these files is future work (§6).
 
 ## 5. Intended behaviour vs. current code — biggest differences
 
@@ -408,8 +469,8 @@ severities in [BUG.md](BUG.md)):
 
 | # | Area | Intended | Current | Bug |
 |---|---|---|---|---|
-| 1 | ADC bit depth in `DataModel` | histogram bins/overflow derived from the ADC bits | bits/range flow from the config into the archives, but `DataModel` still uses fixed 12-bit bins | B6 |
-| 2 | Ramp sampling | ramp samples acquired and stored | timing triggers only; acquisition side not implemented (deferred by design, not a bug) | — |
+| 1 | ADC bit depth in `DataModel` | histogram bins/overflow derived from the ADC bits | done — `SessionModel.adc_bits` (config / archive) drives bins, sentinel and UI scaling everywhere | B6 (fixed) |
+| 2 | Ramp sampling | ramp samples acquired and stored | app side done (AQR1 storage §4.4, window extraction, simulation, save/recovery); the real streaming acquisition driver (NI) is future work | — |
 | 3 | Dead legacy code | removed | superseded drivers in `services/`, unused ACF/PACF, `if False:` block remain | B17 |
 
 ## 6. Open design points
@@ -417,13 +478,21 @@ severities in [BUG.md](BUG.md)):
 - **Simulation config**: a `hardware_config.json` whose devices use a
   `simulation_*` driver code, so simulation runs through the same config/roles
   path as real hardware.
-- **NI (or other) acquisition driver**: `IDataAcquisition` implementation
-  registered e.g. as `ni_daqmx_v1` (multi-range ADC, `adc_input` per channel),
-  while a µC keeps the `timing` role.
+- **NI (or other) acquisition driver**: *implemented* — `ni_daqmx_v1`
+  (USB-6451: external CONV_START sample clock on PFI0, fixed input terminals
+  keyed by the channel `termination`, ±0.2/±2.5/±5/±10 V ranges, 20-bit
+  counts streamed into the ramp sink; ramp dt validated against the 1 MS/s
+  per-channel limit at Apply Configuration). Tested against a fake
+  `nidaqmx` module; still open: validation with the real card + DAQmx
+  runtime on the measurement PC.
 - **Per-channel event mode** (ME on one detector, SE on the other): future
   extension of `set_event_mode`.
-- **Ramp sampling acquisition**: reader and storage for ramp samples (the timing
-  side is ready).
+- **Ramp sampling acquisition**: *app side done* — the AQR1 streaming storage
+  (§4.4), the window extraction feeding the classic pipeline, the simulated
+  ramp source, save/crash-recovery and the `ramp_sink` interface exist and are
+  tested, and the NI driver streams into the sink (see above). Still open:
+  validation with real hardware, and the monitoring/FFT UI reading the files
+  via `np.memmap`.
 - **Device identity check**: *liveness done* — the PICO2DAQ 2.0 firmware's
   `V` handshake returns a unique per-board id and the driver verifies
   firmware + clock on every connect (wrong board or bare Pico refuses the

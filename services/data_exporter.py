@@ -115,15 +115,20 @@ class DataExporter:
         return settings
 
     @staticmethod
-    def export_to_zip(session_model, temp_csv_path: str, zip_filepath: str, results_dict=None, analysis_meta=None, hardware_manager=None, hardware_config_text=None, setup_json_text=None) -> bool:
+    def export_to_zip(session_model, temp_csv_path: str, zip_filepath: str, results_dict=None, analysis_meta=None, hardware_manager=None, hardware_config_text=None, setup_json_text=None, ramp_meta=None) -> bool:
         """
         Bundles the CSV data, settings and (v3) verbatim copies of the
         hardware config and campaign setup into a self-contained zip.
+        `ramp_meta` (see services/ramp_storage.publish_ramp_files) is stored
+        as the settings' "ramp" section: the ramp binary files live *outside*
+        the zip, in the referenced folder.
         """
         try:
             settings_dict = DataExporter.build_settings_dict(
                 session_model, results_dict, analysis_meta, hardware_manager
             )
+            if ramp_meta:
+                settings_dict["ramp"] = ramp_meta
             settings_json = json.dumps(settings_dict, indent=4)
 
             with zipfile.ZipFile(zip_filepath, 'w', zipfile.ZIP_DEFLATED) as zf:
