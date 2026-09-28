@@ -340,7 +340,11 @@ separate from `DataModel`.
   `index.json` (per-channel totals, gaps, dropped blocks, uuid).
 - **Window extraction** (`RampWindowExtractor`): chunks each channel's
   stream into windows of exactly `N = T_int/dt + 1` samples (the hardware
-  guarantee, §NI 1.2); emits the **first and last sample of every window**
+  guarantee, §NI 1.2) — with `N` taken from the timing driver's mirror
+  (`ActualTiming.samples_per_window`, threaded through the session at
+  preview/Apply) rather than re-derived from the quantized times, whose
+  lossy division silently misaligned the grid (BUG.md B35/B36). It emits
+  the **first and last sample of every window**
   as the classic debug tuples — the *only* ramp data the variance–
   covariance estimators ever see. A window missing on any channel is
   dropped as a pair (never silently misaligned); `flush()` at stop counts

@@ -200,6 +200,15 @@ edges fall inside the integration window at 0, dt, …, T_int — **never**
 during reset — which is exactly the contract the NI card and the ramp
 window extractor rely on.
 
+> **Edge-time footnote (markers mode).** The "0" of the edge train is the
+> *pulse-train* start, which begins one settle after the reset release:
+> 2 µs (software generator) or 2·dt (PIO generator, whose settle is 20 PIO
+> cycles). In markers mode with the PIO generator and T_int ≤ 100 µs the
+> two edges therefore sit at 2·T_int and 3·T_int after GP14 rises — the
+> pair still spans exactly T_int (the measurement is unaffected; both
+> samples lie on the same linear ramp), but the absolute edge phase
+> differs from the naive "at 0 and T_int" reading.
+
 ---
 
 ## Part 2 — The application driver (`pico_serial_v1`)

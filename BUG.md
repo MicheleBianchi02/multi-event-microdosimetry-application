@@ -303,6 +303,128 @@ Severity scale:
   (`test_configure_timing_raises_the_mirror_reason` covers the shared
   helper).
 
+### B35 — Ramp preview ≠ applied timing: Apply re-quantized the mirror's output — **FIXED** *(reported 2026-09-28)*
+- **Intended:** the wizard's true-values card, the session and the archive
+  describe the timing the hardware actually runs; Apply programs exactly
+  what the preview showed (README §2.1, "the true-values preview, the
+  applied configuration and the firmware's Q all report the same numbers").
+- **Current (as found):** the wizard's Apply sent the *preview-quantized*
+  session values (`int_time_us = session.int_time * 1e6`) back into
+  `configure_ramp`, which runs the exact mirror a **second** time. For
+  non-grid dt on the PIO generator (dt ≤ 100 µs not on the 1/3840 µs
+  divider grid) the double floor loses one integration interval: dt =
+  7.31 µs with T_int = 100.0066 µs previewed 95.03 µs / 14 pulses but
+  programmed 87.72 µs / 13 pulses — with the one-time `Q` verification
+  comparing against the second (self-consistent) mirror pass, so nothing
+  detected it. Grid dt and the software generator were immune, hiding the
+  bug from every "nice" test value.
+- **Fixed (2026-09-28):** the wizard collects the TYPED values once
+  (`TimeWindow._collect_timing_values`, shared by preview and Apply), so
+  the mirror sees identical inputs in both passes; after a successful
+  Apply the session is refreshed from the same mirror. The PIO raw-count
+  math (`div/div_frac8/reset_pio/intervals`) now lives in one helper
+  (`_pio_raw_counts`) shared by the mirror and the `O` command, so the
+  programmed counts cannot drift from the preview. Regression tests:
+  `tests/test_ramp_alignment.py`
+  (`test_apply_sends_the_typed_values_not_the_previewed_session`),
+  `tests/test_pico_driver.py`
+  (`test_configure_ramp_o_counts_match_the_mirror`).
+
+### B36 — Ramp window extractor derived its window size lossily — silent grid misalignment — **FIXED** *(reported 2026-09-28)*
+- **Intended:** the sink chunks the stream on exactly the number of
+  CONV_START edges the generator emits per window (a hardware guarantee);
+  a mismatched window size silently pairs (stop_k, start_k+1) with no gap
+  recorded — the contiguity check sees nothing.
+- **Current (as found):** `MeasurementController._start_ramp_storage`
+  re-derived `N = round(session.int_time / session.ramp_dt_s) + 1` from
+  the quantized integration time and the **requested** dt, while the
+  firmware emits `floor(int/(150·dt)) + 1` edges. With dt truncated
+  (dt_eff < dt) the division drifts by `intervals·(dt−dt_eff)/dt`: at
+  dt = 7.31 µs with T_int = 10 s the extractor expected 1 367 972
+  samples per window against 1 367 990 hardware pulses — 18 samples of
+  accumulating phase error per window. Combined with B35 even short runs
+  mismatched (N 14 vs 13 pulses). The simulator and the NI reader's
+  expected rate re-derived the same quantity, and the unit tests passed
+  `samples_per_window` explicitly — the pattern that hid B24.
+- **Fixed (2026-09-28):** `ActualTiming` now carries the applied window
+  geometry (`samples_per_window`, `ramp_dt_eff_us`) from the driver's
+  mirror — the single source of truth. The session stores it at
+  preview/Apply; the ramp sink, the simulator and the AQR1 headers
+  consume it verbatim; no consumer re-derives int/dt any more.
+  Regression tests: `tests/test_ramp_alignment.py`
+  (`test_preview_threads_the_applied_geometry_into_the_session`,
+  `test_long_integration_drift_case_matches_the_hardware_pulse_count`,
+  `test_markers_preview_sets_two_samples_per_window`,
+  `test_markers_sink_chunks_on_the_session_geometry`), plus the scripted
+  end-to-end chain check `temp/verify_ramp_chain.py`.
+
+### B37 — The applied ADC input range was never recorded; archives and ramp headers carried the declared default — **FIXED** *(reported 2026-09-28)*
+- **Intended:** `hardware_settings.adc.input_range_volts` and the AQR1
+  header record the range **applied** during the run (HARDWARE_CONFIG
+  §6.2), and the charge conversion uses it.
+- **Current (as found):** `set_input_range` forwarded the wizard's choice
+  to the driver and the knowledge died there — `get_adc_settings()`
+  always returned the config's declared default. A NI run at ±0.2 V
+  recorded (and offline-converted with) ±5 V: charges wrong by 25×,
+  silently. (Distinct from B23, the running window's hardcoded 5 V.)
+- **Fixed (2026-09-28):** the manager remembers the last successfully
+  applied range and reports it through `get_adc_settings()` (archives,
+  ramp headers, the charge factor). Regression test:
+  `tests/test_hardware_manager.py`
+  (`test_applied_input_range_is_reported_until_reapplied`).
+
+### B38 — Crash recovery relabeled every ramp file "internal" — **FIXED** *(reported 2026-09-28)*
+- **Intended:** `recover_ramp_file` trims a crashed temp file to its last
+  whole window and rewrites the header with the same facts it was
+  recorded with.
+- **Current (as found):** `parse_header` returns the timing mode as the
+  numeric code, `RampFileMeta` expects the name and `header_bytes` maps
+  unknown names to 0 — every recovered `.bin` came back `internal`
+  regardless of the run's mode.
+- **Fixed (2026-09-28):** the code→name inverse map (`MODE_NAMES`).
+  Regression test: `tests/test_ramp_storage.py`
+  (`test_recover_preserves_the_timing_mode`).
+
+### B39 — A dead ramp writer thread hung `close()` forever — **FIXED** *(reported 2026-09-28)*
+- **Intended:** `close()` bounds every wait; a failed writer surfaces its
+  error and still finalizes the files.
+- **Current (as found):** `close()` queued its stop sentinel with an
+  unbounded `put` — with the writer thread dead (its catch-all handler
+  exits without draining) and the bounded queue full, `put` blocked
+  forever *before* the 30 s join timeout could even start: the UI thread
+  hung on STOP. The markers-mode pair extractor had the same pattern.
+- **Fixed (2026-09-28):** the sentinel put is bounded (5 s); on expiry the
+  failure is recorded in the summary/index and the files are finalized
+  anyway. Regression test: `tests/test_ramp_storage.py`
+  (`test_close_returns_when_the_writer_thread_died`).
+
+### B40 — Ramp routing/robustness gaps around the ramp path — **FIXED** *(reported 2026-09-28)*
+- Four smaller findings fixed together:
+  - **Ramp on ramp-incapable timing fell through generically**:
+    `timing_mode_for(True)` returned "ramp" before consulting
+    `supports_ramp_sampling`; the PIC's `configure_ramp` then failed with
+    a generic message. It now raises `ValueError` with the reason,
+    surfaced by the preview and Apply (test_timing_routing.py).
+  - **Markers mode with a non-grid T_int ≤ 100 µs was rejected with a
+    misleading message**: the PIO mirror raised "int must be at least one
+    dt interval" when the real cause was cycle-flooring (dt = int) or a
+    sub-tick reset. The mirror now clamps exactly like the firmware
+    (`recompute_ramp_params`): interval flooring → one interval, sub-tick
+    reset → one dt/10 tick; only a genuine int < dt is rejected, with a
+    message naming the constraint (test_pico_driver.py).
+  - **The one-time `Q` verification ignored the `pulses` field** — the
+    one field that would have caught B35/B36. It is now verified exactly
+    on the PIO path, where `O` programs it verbatim
+    (`test_configure_ramp_verifies_pulses_via_q`). (The software path
+    skips it: the 2.1 firmware derives the pre-run `Q` display pulses
+    from the un-floored dt while the engine — and the mirror — floor dt
+    to cycles first; the engine overwrites the display at run start.)
+  - **A failed measurement start left the temp CSV open**, and the DAQmx
+    host buffer was never sized explicitly (an undersized buffer turns a
+    transient host stall into a fatal overrun). Fixed in
+    `MeasurementController.start_device` / `NIDAQmxAcquisition`
+    (`input_buf_size` ≈ 5 s of stream, bounded; test_ni_driver.py).
+
 ---
 
 ## LOW

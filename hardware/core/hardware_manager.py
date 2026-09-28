@@ -12,7 +12,7 @@ from hardware.config import (
     file_sha256,
     load_hardware_config,
 )
-from hardware.config.schema import FixedValue, ParameterBounds
+from hardware.config.schema import FixedValue, ParameterBounds, VoltageRange
 from hardware.interfaces.acquisition import IDataAcquisition
 from hardware.interfaces.timing import ITimingController, ActualTiming
 from hardware.interfaces.gain import IGainController
@@ -58,6 +58,14 @@ class HardwareManager:
         self._selected_gain = {"ch1": None, "ch2": None}
         self._gain_state_unknown = False
 
+        # The ADC input range APPLIED on the acquisition device (set by the
+        # last successful set_input_range; None = the config's declared
+        # default is in effect).  get_adc_settings() reports this, so the
+        # measurement archives and the ramp-file headers record the range
+        # the counts were actually converted with — not the declared
+        # default (a mislabeled range would corrupt every charge value).
+        self._applied_input_range: Optional[VoltageRange] = None
+
         self._config_listeners: list[Callable] = []
 
     # ------------------------------------------------------------------
@@ -89,6 +97,7 @@ class HardwareManager:
         self.config_path = path
         self.config_text = text
         self.config_sha256 = file_sha256(path) if path else None
+        self._applied_input_range = None  # a new device starts at its default
 
         self.devices = {}
         for dev_id, device_config in config.devices.items():
@@ -243,19 +252,25 @@ class HardwareManager:
         }
 
     def get_adc_settings(self) -> dict:
-        """ADC properties of the acquisition device, from the loaded config."""
+        """ADC properties of the acquisition device, from the loaded config.
+
+        ``input_range_volts`` is the range APPLIED during this run — the
+        last successful set_input_range when the user chose one, else the
+        config's declared default — because that is the span the counts are
+        converted over (archives and ramp-file headers record it)."""
         if not self.config or self.acquisition is None:
             return {}
         device = self.config.devices.get(self.config.roles.acquisition)
         if device is None or device.acquisition is None:
             return {}
         adc = device.acquisition.adc
+        effective = self._applied_input_range or adc.effective_range()
         return {
             "bits": adc.bits,
             "num_channels": device.acquisition.num_channels,
             "input_range_volts": {
-                "min_volts": adc.effective_range().min_volts,
-                "max_volts": adc.effective_range().max_volts,
+                "min_volts": effective.min_volts,
+                "max_volts": effective.max_volts,
             },
             "input_ranges_volts": [
                 {"min_volts": r.min_volts, "max_volts": r.max_volts}
@@ -450,8 +465,21 @@ class HardwareManager:
         - 'internal': classic no-ramp on the device's own ADC (all-in-one
           setups, or a timing device without trigger capability — e.g. the
           PIC — which falls back with a warning).
+
+        Requesting ramp sampling from a timing device that cannot emit
+        ramp triggers raises ValueError (surfaced by the preview/Apply):
+        silently falling back to a no-ramp run would record a measurement
+        with a different meaning than the user asked for.  The UI hides
+        the option for such devices; this is the enforcement behind it.
         """
         if sample_ramp:
+            if self.timing is not None and not getattr(
+                self.timing, "supports_ramp_sampling", False
+            ):
+                raise ValueError(
+                    "ramp sampling requested but the timing device does not "
+                    "support ramp-sampling triggers"
+                )
             return "ramp"
         if (
             self.timing is not None
@@ -563,9 +591,18 @@ class HardwareManager:
     # ------------------------------------------------------------------
 
     def set_input_range(self, min_volts: float, max_volts: float) -> bool:
-        """Set active ADC input range on the acquisition device."""
+        """Set active ADC input range on the acquisition device.
+
+        On success the applied range is remembered: get_adc_settings()
+        reports it (the archives and ramp headers record the span the
+        counts were converted with), instead of the declared default."""
         if self.acquisition is not None:
-            return self.acquisition.set_input_range(min_volts, max_volts)
+            if self.acquisition.set_input_range(min_volts, max_volts):
+                self._applied_input_range = VoltageRange(
+                    min_volts=float(min_volts), max_volts=float(max_volts)
+                )
+                return True
+            return False
         return False
 
     # ------------------------------------------------------------------

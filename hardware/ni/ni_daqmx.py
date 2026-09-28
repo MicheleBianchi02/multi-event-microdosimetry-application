@@ -53,6 +53,15 @@ logger = logging.getLogger(__name__)
 TARGET_BLOCK_SECONDS = 0.02
 MAX_BLOCK_SAMPLES = 1 << 20
 
+# Host-side DAQmx buffer: sized explicitly from the expected rate (samples
+# per channel) instead of leaving the DAQmx default.  The buffer is the
+# first line of defense against host hiccups (GUI stalls share the GIL
+# with this Python reader) — an overrun fails the acquisition, so give it
+# a few seconds of slack, bounded in memory.
+BUFFER_SECONDS = 5.0
+MIN_BUFFER_SAMPLES = 10_000
+MAX_BUFFER_SAMPLES = 50_000_000
+
 # Read timeout, bounded: it is the armed-but-no-edges watchdog during the
 # run and keeps stop responsive (the stop drain must complete before
 # task.stop() discards whatever the buffer still holds).
@@ -281,6 +290,10 @@ class NIDAQmxAcquisition(IDataAcquisition):
                 active_edge=Edge.RISING,
                 sample_mode=AcquisitionType.CONTINUOUS,
             )
+            # Explicit host buffer (samples per channel): the DAQmx default
+            # is derived from the rate it is told, and an undersized buffer
+            # turns a transient host stall into a fatal acquisition error.
+            task.in_stream.input_buf_size = self._buffer_size(expected_rate)
         except Exception:
             logger.exception("DAQmx task configuration failed")
             try:
@@ -441,13 +454,27 @@ class NIDAQmxAcquisition(IDataAcquisition):
 
     def _expected_rate_hz(self, session) -> float:
         """Nominal stream rate from the session timing (used for buffer
-        sizing and read timeouts; the true rate is set by CONV_START)."""
+        sizing and read timeouts; the true rate is set by CONV_START).
+        The session carries the APPLIED values from the timing driver's
+        mirror — dt is the effective (quantized) dt and int the quantized
+        integration time, so the sizing matches what the edges will do."""
         mode = getattr(session, "timing_mode", "ramp")
         if mode == "markers":
             dt_s = getattr(session, "int_time", 0.001)
         else:
             dt_s = getattr(session, "ramp_dt_s", 0.0) or 1e-6
         return 1.0 / dt_s if dt_s > 0 else 1e6
+
+    @staticmethod
+    def _buffer_size(rate_hz: float) -> int:
+        """Host buffer in samples per channel: ~BUFFER_SECONDS of stream,
+        bounded to keep memory sane (the property counts per channel)."""
+        if not rate_hz or rate_hz <= 0:
+            return MIN_BUFFER_SAMPLES
+        return max(
+            MIN_BUFFER_SAMPLES,
+            min(int(rate_hz * BUFFER_SECONDS), MAX_BUFFER_SAMPLES),
+        )
 
     @staticmethod
     def _read_timeout_s(block: int, rate_hz: float) -> float:

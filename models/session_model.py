@@ -39,10 +39,18 @@ class SessionModel(QObject):
         # (ramp-sampling triggers), or 'markers' (integration-window markers
         # for an external digitizer = degenerate ramp with dt = int).
         self.timing_mode = "internal"
-        # Actual ramp-sampling interval (seconds) when timing_mode is
-        # 'ramp'; 0.0 otherwise.  The ramp files' header records it and the
-        # window extractor derives N = T_int/dt + 1 from it.
+        # The APPLIED (quantized) ramp-sampling interval in seconds when
+        # timing_mode is 'ramp'; 0.0 otherwise.  Set from the timing
+        # driver's exact mirror (ActualTiming.ramp_dt_eff_us) — never from
+        # the requested dt, so every consumer (the NI reader's expected
+        # rate, the AQR1 header) sees what the generator actually emits.
         self.ramp_dt_s = 0.0
+        # Samples (CONV_START edges) per integration window the generator
+        # will emit, from the driver's exact mirror
+        # (ActualTiming.samples_per_window); 0 when not in ramp/markers
+        # mode.  The ramp sink chunks on exactly this number — deriving it
+        # downstream from int/dt is lossy and misaligns the window grid.
+        self.samples_per_window = 0
 
         self.baud_rate = 115200
         self.port = None

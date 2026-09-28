@@ -174,6 +174,26 @@ class SetupController(QObject):
             self.time_window.on_configuration_result(False)
             logger.exception("Communication failed")
 
+    def _refresh_session_timing(self, actual, mode: str):
+        """Store the driver-mirror timing (the values the hardware will
+        actually apply) in the session — including the ramp window geometry
+        (samples_per_window / applied dt) the ramp path consumes verbatim:
+        re-deriving N = int/dt downstream is lossy and misaligns windows."""
+        self.session.timing_mode = mode
+        self.session.int_time = actual.int_time_us / 1e6
+        self.session.reset_time = actual.reset_time_us / 1e6
+        self.session.period_s = actual.period_us / 1e6
+        self.session.sample_freq = actual.sample_frequency_hz
+        if mode == "ramp":
+            self.session.ramp_dt_s = (actual.ramp_dt_eff_us or 0.0) / 1e6
+            self.session.samples_per_window = int(actual.samples_per_window or 0)
+        elif mode == "markers":
+            self.session.ramp_dt_s = 0.0
+            self.session.samples_per_window = int(actual.samples_per_window or 2)
+        else:
+            self.session.ramp_dt_s = 0.0
+            self.session.samples_per_window = 0
+
     def on_timing_calculation_requested(
         self, int_time_s: float, reset_time_s: float, period_s: float = None,
         ramp_dt_us: float = None,
@@ -210,11 +230,7 @@ class SetupController(QObject):
                 "(see the log for the reason).",
             )
             return
-        self.session.timing_mode = mode
-        self.session.int_time = actual.int_time_us / 1e6
-        self.session.reset_time = actual.reset_time_us / 1e6
-        self.session.period_s = actual.period_us / 1e6
-        self.session.sample_freq = actual.sample_frequency_hz
+        self._refresh_session_timing(actual, mode)
         self.time_window.update_actual_timing(actual)
 
     def on_mode_switched(self):
@@ -288,6 +304,22 @@ class SetupController(QObject):
         if not success:
             logger.error("Timing configuration rejected by the timing device")
             return False
+
+        # Refresh the session from the same mirror the hardware was just
+        # programmed through (identical inputs -> identical quantized
+        # values): the session, the wizard card and the ramp geometry the
+        # measurement will chunk on are guaranteed to describe the applied
+        # timing even if the preview never ran for these values.
+        try:
+            actual, mode = hw_mgr.preview_timing(
+                sample_ramp, ramp_dt_us,
+                timer_params["int_time_us"], timer_params["reset_time_us"],
+                period_us=period_us,
+            )
+            if actual is not None:
+                self._refresh_session_timing(actual, mode)
+        except ValueError:
+            logger.exception("Post-apply timing refresh failed (hardware already configured)")
 
         # Gains, atomically (B19). CH2 must have a selection whenever it is active.
         g1_label = timer_params.get("gain_ch1_label")

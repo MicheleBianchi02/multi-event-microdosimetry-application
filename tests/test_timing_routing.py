@@ -152,3 +152,39 @@ def test_time_window_failure_message_is_backward_compatible():
 
     params = inspect.signature(TimeWindow.on_configuration_result).parameters
     assert "message" in params and params["message"].default is None
+
+
+def test_ramp_request_on_ramp_incapable_timing_raises():
+    """Ramp sampling requested from a timing device without ramp triggers
+    (e.g. the PIC) must raise with the reason — not fall back to a
+    no-ramp run whose data would mean something else than requested."""
+    timing = StubTiming()
+    timing.supports_ramp_sampling = False
+    manager = make_manager(timing, StubAcquisition())
+    with pytest.raises(ValueError, match="does not support ramp"):
+        manager.timing_mode_for(True)
+    with pytest.raises(ValueError, match="does not support ramp"):
+        manager.configure_timing(True, 10.0, 100.0, 20.0)
+    with pytest.raises(ValueError, match="does not support ramp"):
+        manager.validate_timing(True, 10.0, 100.0, 20.0)
+    with pytest.raises(ValueError, match="does not support ramp"):
+        manager.preview_timing(True, 10.0, 100.0, 20.0)
+    # without the request the same hardware routes to markers/internal as before
+    assert manager.timing_mode_for(False) == "internal"
+
+
+def test_preview_carries_the_applied_window_geometry():
+    """The routed preview returns the driver mirror's window geometry —
+    what the session (and through it the ramp sink) chunks on."""
+    from hardware.pico.pico_daq import PicoSerialDAQ
+
+    manager = make_manager(PicoSerialDAQ(), StubAcquisition())
+    actual, mode = manager.preview_timing(True, 7.31, 100.0066, 50.0)
+    assert mode == "ramp"
+    assert actual.samples_per_window == 14
+    assert actual.ramp_dt_eff_us == pytest.approx(7.309895833)
+
+    # markers (no ramp requested on split hardware): exactly 2 edges/window
+    actual, mode = manager.preview_timing(False, None, 99.9934, 5.0)
+    assert mode == "markers"
+    assert actual.samples_per_window == 2

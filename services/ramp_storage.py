@@ -71,6 +71,7 @@ STATE_FINALIZED = 1
 STATE_ABORTED = 2
 
 MODE_CODES = {"internal": 0, "ramp": 1, "markers": 2}
+MODE_NAMES = {code: name for name, code in MODE_CODES.items()}  # header -> meta
 
 DTYPES = {"<u4": 0, "uint32": 0}  # dtype.str is endian-explicit; str() may not be
 
@@ -475,7 +476,14 @@ class RampStorageService(_BlockSinkBase):
         if self._closed:
             return self.summary(state)
         self._closed = True
-        self._queue.put(None)
+        # Bounded sentinel put: if the writer thread already died (its
+        # catch-all handler exits without draining), an unbounded put on a
+        # full queue would block forever — the join timeout below would
+        # never even be reached and the UI thread would hang.
+        try:
+            self._queue.put(None, timeout=5.0)
+        except queue.Full:
+            self._error = self._error or "writer thread did not drain the queue"
         self._thread.join(timeout=30.0)
         if self._thread.is_alive():
             self._error = "writer thread did not finish within 30 s"
@@ -594,7 +602,12 @@ class RampPairExtractorService(_BlockSinkBase):
         if self._closed:
             return self.summary()
         self._closed = True
-        self._queue.put(None)
+        # Bounded like RampStorageService.close: a dead extractor thread
+        # must not turn the sentinel put into a permanent UI hang.
+        try:
+            self._queue.put(None, timeout=5.0)
+        except queue.Full:
+            self._error = self._error or "pair extractor did not drain the queue"
         self._thread.join(timeout=10.0)
         if self._thread.is_alive():
             self._error = "pair extractor did not finish within 10 s"
@@ -736,6 +749,9 @@ def recover_ramp_file(path: str) -> Optional[dict]:
             f.seek(size)
             f.truncate()
             # rewrite state/samples_written via a fresh header block
+            # (parse_header yields the timing-mode CODE; the meta wants
+            # the name — writing the code back would relabel the file
+            # "internal" whatever mode it was recorded in)
             meta = RampFileMeta(
                 channel_index=header["channel_index"],
                 channel_label=header["channel_label"],
@@ -747,7 +763,7 @@ def recover_ramp_file(path: str) -> Optional[dict]:
                 integration_time_s=header["integration_time_s"],
                 reset_time_s=header["reset_time_s"],
                 samples_per_window=n,
-                timing_mode=header["timing_mode"],
+                timing_mode=MODE_NAMES.get(header["timing_mode"], "internal"),
                 driver_code=header["driver_code"],
                 firmware_version=header["firmware_version"],
                 app_version=header["app_version"],

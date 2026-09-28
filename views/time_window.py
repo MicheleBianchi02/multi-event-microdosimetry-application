@@ -407,52 +407,65 @@ class TimeWindow(QWidget):
 
         self.session.measurement_note = self.meas_note_input.toPlainText()
 
+    def _collect_timing_values(self):
+        """Parse the timing fields exactly as typed (seconds for the times,
+        µs for the ramp dt).  Single source for the preview AND for Apply:
+        both must feed the driver's quantization mirror identical inputs —
+        re-sending the preview's already-quantized session values would
+        quantize a second time (one integration interval can be lost on
+        the PIO generator).  Raises ValueError on unparsable input."""
+        # Integration
+        t_int = self._sanitize_number(self.int_time.text())
+        self.int_time.setText(t_int)
+        val_int = float(t_int)
+        mag_i = self.magnitude_int.currentText()
+        mult_i = 1.0 if mag_i == "s" else (1e-3 if mag_i == "ms" else 1e-6)
+        final_int = val_int * mult_i
+
+        # Reset
+        t_rst = self._sanitize_number(self.rst_time.text())
+        self.rst_time.setText(t_rst)
+        val_rst = float(t_rst)
+        mag_r = self.magnitude_rst.currentText()
+        mult_r = 1.0 if mag_r == "s" else (1e-3 if mag_r == "ms" else 1e-6)
+        final_rst = val_rst * mult_r
+
+        # Period (if configurable)
+        final_period = None
+        if self.period_widget.isVisible() and self.period_time.text().strip():
+            t_prd = self._sanitize_number(self.period_time.text())
+            self.period_time.setText(t_prd)
+            if t_prd:
+                val_prd = float(t_prd)
+                mag_p = self.magnitude_period.currentText()
+                mult_p = 1.0 if mag_p == "s" else (1e-3 if mag_p == "ms" else 1e-6)
+                final_period = val_prd * mult_p
+
+        # Ramp dt travels with the request: the true-values preview is
+        # ramp-aware (generator selection and quantization depend on it).
+        # An unparsable dt yields None here (the preview falls back to the
+        # no-ramp numbers) — _validate_timing_inputs flags the field red
+        # and blocks Apply separately.
+        final_dt = None
+        if self.sample_ramp_cb.isVisible() and self.sample_ramp_cb.isChecked():
+            try:
+                final_dt = float(self.ramp_dt_input.text())
+            except ValueError:
+                final_dt = None
+
+        return final_int, final_rst, final_period, final_dt
+
     def on_manual_edit(self):
         self.already_sent = False
         self.editing_time.emit()
         self.send_bnt.setEnabled(False)
 
         try:
-            # Integration
-            t_int = self._sanitize_number(self.int_time.text())
-            self.int_time.setText(t_int)
-            val_int = float(t_int)
-            mag_i = self.magnitude_int.currentText()
-            mult_i = 1.0 if mag_i == "s" else (1e-3 if mag_i == "ms" else 1e-6)
-            final_int = val_int * mult_i
-
-            # Reset
-            t_rst = self._sanitize_number(self.rst_time.text())
-            self.rst_time.setText(t_rst)
-            val_rst = float(t_rst)
-            mag_r = self.magnitude_rst.currentText()
-            mult_r = 1.0 if mag_r == "s" else (1e-3 if mag_r == "ms" else 1e-6)
-            final_rst = val_rst * mult_r
-
-            # Period (if configurable)
-            final_period = None
-            if self.period_widget.isVisible() and self.period_time.text().strip():
-                t_prd = self._sanitize_number(self.period_time.text())
-                self.period_time.setText(t_prd)
-                if t_prd:
-                    val_prd = float(t_prd)
-                    mag_p = self.magnitude_period.currentText()
-                    mult_p = 1.0 if mag_p == "s" else (1e-3 if mag_p == "ms" else 1e-6)
-                    final_period = val_prd * mult_p
-
+            final_int, final_rst, final_period, final_dt = self._collect_timing_values()
             # Validate against the declared envelope of the loaded hardware
             # config; out-of-bounds inputs are highlighted and block Apply
             # (the drivers would reject them at configure time).
             self._inputs_valid = self._validate_timing_inputs(final_int, final_rst, final_period)
-
-            # Ramp dt travels with the request: the true-values preview is
-            # ramp-aware (generator selection and quantization depend on it).
-            final_dt = None
-            if self.sample_ramp_cb.isVisible() and self.sample_ramp_cb.isChecked():
-                try:
-                    final_dt = float(self.ramp_dt_input.text())
-                except ValueError:
-                    final_dt = None
             self.timing_calculation_requested.emit(final_int, final_rst, final_period, final_dt)
         except ValueError:
             self._inputs_valid = False
@@ -711,29 +724,27 @@ class TimeWindow(QWidget):
     def on_send_press(self):
         if not self._selections_complete():
             return  # backstop: Apply requires a gain for every active channel
-        self.status_frame.setVisible(True)
-        ramp_dt = 10.0
         try:
-            ramp_dt = float(self.ramp_dt_input.text())
+            final_int, final_rst, final_period, final_dt = self._collect_timing_values()
         except ValueError:
-            pass
+            return  # unparsable time field: the highlighted inputs block Apply
+        if self.sample_ramp_cb.isChecked() and self._ramp_allowed and final_dt is None:
+            return  # ramp requested but the dt field is unparsable
+        self.status_frame.setVisible(True)
 
-        period_us = None
-        if self.period_widget.isVisible() and self.period_time.text().strip():
-            try:
-                p_val = float(self.period_time.text())
-                mag_p = self.magnitude_period.currentText()
-                mult_p = 1.0 if mag_p == "s" else (1e-3 if mag_p == "ms" else 1e-6)
-                period_us = p_val * mult_p * 1e6
-            except ValueError:
-                pass
+        period_us = final_period * 1e6 if final_period is not None else None
 
+        # The TYPED values, not the session's preview-quantized ones: the
+        # preview and Apply must feed the driver's exact mirror identical
+        # inputs — quantizing already-quantized values loses up to one
+        # integration interval on the PIO generator, and the hardware
+        # would then run a different timing than the wizard reported.
         config = {
-            "int_time_us": self.session.int_time * 1e6,
-            "reset_time_us": self.session.reset_time * 1e6,
+            "int_time_us": final_int * 1e6,
+            "reset_time_us": final_rst * 1e6,
             "period_us": period_us,
             "sample_ramp": self.sample_ramp_cb.isChecked() and self._ramp_allowed,
-            "ramp_dt_us": ramp_dt,
+            "ramp_dt_us": final_dt if final_dt is not None else 10.0,
             "gain_ch1_label": self.capacitance_combo_ch1.currentText(),
             "gain_ch2_label": self.capacitance_combo_ch2.currentText() if self.capacitance_combo_ch2.isVisible() else None,
         }

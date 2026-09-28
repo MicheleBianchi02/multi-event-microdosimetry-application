@@ -184,10 +184,18 @@ class HardwareService:
         session = self.session
         bits = getattr(session, "adc_bits", DEFAULT_ADC_BITS)
         full_scale = 2**bits - 1
-        dt_s = getattr(session, "ramp_dt_s", 0.0) or (
-            session.int_time if session.timing_mode == "markers" else 1e-5
-        )
-        n_per_window = int(round(session.int_time / dt_s)) + 1 if dt_s > 0 else 2
+        # Window geometry from the timing driver's mirror (set at preview/
+        # Apply): the same samples_per_window the real generator emits, so
+        # simulation exercises the extraction identically.  The fallback
+        # derivation only serves direct calls without a configured session.
+        n_per_window = int(getattr(session, "samples_per_window", 0) or 0)
+        if n_per_window < 2:
+            dt_s = getattr(session, "ramp_dt_s", 0.0) or (
+                session.int_time if session.timing_mode == "markers" else 1e-5
+            )
+            n_per_window = (
+                int(round(session.int_time / dt_s)) + 1 if dt_s > 0 else 2
+            )
         period_s = session.period_s or (session.int_time + session.reset_time)
         channels = [0] + ([1] if session.multiple_channel else [])
         rng = np.random.default_rng()

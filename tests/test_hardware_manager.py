@@ -2,6 +2,7 @@
 Tests for the refactored HardwareManager (no physical hardware needed).
 """
 import json
+import types
 
 import pytest
 
@@ -563,3 +564,53 @@ def test_set_event_mode_signals_shared_device_once(tmp_path):
     assert manager.set_event_mode(False) is True
     assert calls == [False]
 
+
+
+def test_applied_input_range_is_reported_until_reapplied(tmp_path):
+    """get_adc_settings() reports the range APPLIED on the acquisition
+    device (the last successful set_input_range), not the declared
+    default: the archives and ramp-file headers record it as the span the
+    counts were converted over.  Split config (NI card, 4 ranges,
+    declared default +/-5 V)."""
+    from helpers import split_config
+
+    path = tmp_path / "split.json"
+    cfg = split_config()
+    # the helper declares 16 bits for the NI; the real driver has 20 —
+    # only the range semantics are under test here
+    cfg["devices"]["ni_1"]["capabilities"]["acquisition"]["adc"]["bits"] = 20
+    path.write_text(json.dumps(cfg))
+
+    manager = HardwareManager()
+    manager.load_config(str(path))
+    declared = manager.get_adc_settings()["input_range_volts"]
+    assert declared["min_volts"] == -5.0 and declared["max_volts"] == 5.0
+
+    assert manager.set_input_range(-0.2, 0.2) is True
+    applied = manager.get_adc_settings()["input_range_volts"]
+    assert applied["min_volts"] == -0.2 and applied["max_volts"] == 0.2
+
+    # a rejected range leaves the previous state untouched
+    assert manager.set_input_range(0.0, 1.0) is False  # not a 6451 range
+    still = manager.get_adc_settings()["input_range_volts"]
+    assert still["min_volts"] == -0.2 and still["max_volts"] == 0.2
+
+    # and the exporter embeds the applied range into the archive settings
+    from services.data_exporter import DataExporter
+
+    settings = DataExporter.build_settings_dict(
+        types.SimpleNamespace(
+            debug_mode=True, multiple_channel=True, timestamp_start=None,
+            timestamp_end=None, int_time=1.0, reset_time=1.0, period_s=0.0,
+            sample_freq=1.0, timing_mode="ramp", gpio_mask_ch1=None,
+            gpio_mask_ch2=None, capacitance_pf_ch1=None,
+            capacitance_pf_ch2=None, app_version="t", facility="", beam_type="",
+            particle="", beam_energy_mev=0.0, beam_current_na=0.0, depth_cm=0.0,
+            detector_voltage_v=0.0, calibration_slope=1.0,
+            calibration_intercept=0.0, shift_note="", measurement_note="",
+            is_problematic=False,
+        ),
+        hardware_manager=manager,
+    )
+    rng = settings["hardware_settings"]["adc"]["input_range_volts"]
+    assert rng["min_volts"] == -0.2 and rng["max_volts"] == 0.2

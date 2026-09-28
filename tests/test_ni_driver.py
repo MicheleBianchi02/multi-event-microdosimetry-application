@@ -958,3 +958,24 @@ def test_time_window_failure_branch_makes_the_status_frame_visible():
 
     source = inspect.getsource(TimeWindow.on_configuration_result)
     assert "self.status_frame.setVisible(True)" in source
+
+
+def test_input_buffer_is_sized_from_the_expected_rate(fake_nidaqmx):
+    """The host-side DAQmx buffer is set explicitly (samples per channel,
+    ~5 s of stream, bounded) instead of leaving the driver-runtime default:
+    an undersized buffer turns a transient host stall into a fatal
+    acquisition overrun."""
+    # sanity of the sizing rule itself
+    assert NIDAQmxAcquisition._buffer_size(1e6) == 5_000_000
+    assert NIDAQmxAcquisition._buffer_size(10.0) == 10_000  # the floor
+    assert NIDAQmxAcquisition._buffer_size(1e9) == 50_000_000  # the cap
+    assert NIDAQmxAcquisition._buffer_size(0.0) == 10_000
+
+    driver = make_driver()
+    driver.set_input_range(-5.0, 5.0)
+    sink = StubSink()
+    assert driver.start_measurement(make_session(), None, ramp_sink=sink)
+    (task,) = FakeTask.all_tasks
+    # make_session carries dt = 1 us -> 1 MS/s -> 5 s of buffer
+    assert task.in_stream.input_buf_size == 5_000_000
+    driver.stop_measurement()

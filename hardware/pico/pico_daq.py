@@ -395,6 +395,31 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
                 f"(0 < dt <= {RAMP_DT_MAX_US:g} us)"
             )
 
+    @staticmethod
+    def _pio_raw_counts(ramp_dt_us: float, int_cycles: int, reset_cycles: int):
+        """The PIO generator's raw programming counts — the single source
+        of truth shared by the exact mirror (calculate_ramp_timing) and
+        configure_ramp's 'O' command, so the two can never drift apart.
+
+        Returns (div_int, div_frac8, reset_pio, intervals, dt_eff_us);
+        the firmware clamps a sub-tick reset phase to one dt/10 tick and a
+        cycle-floored zero interval to one interval when the request
+        covers a full dt (recompute_ramp_params), and so does the mirror."""
+        clk = SYS_CLK_MHZ * 1e6
+        div = SYS_CLK_MHZ * ramp_dt_us / 10.0            # ideal divider
+        div_int = int(div)
+        div_frac8 = int((div - div_int) * 256.0)         # firmware truncates
+        div_actual = div_int + div_frac8 / 256.0
+        dt_eff = div_actual * 10.0e6 / clk
+        intervals = int(int_cycles * 1e6 / (clk * ramp_dt_us))
+        if intervals < 1 and int_cycles >= math.floor(ramp_dt_us * SYS_CLK_MHZ):
+            # The request spans at least one whole dt (e.g. markers mode,
+            # dt = int with a non-grid T_int): only the fractional cycle
+            # is lost to flooring — clamp to one interval like the firmware.
+            intervals = 1
+        reset_pio = max(1, int(reset_cycles * 10.0e6 / (clk * ramp_dt_us)))
+        return div_int, div_frac8, reset_pio, intervals, dt_eff
+
     def calculate_ramp_timing(
         self, ramp_dt_us: float, int_time_us: float, reset_time_us: float
     ) -> ActualTiming:
@@ -403,28 +428,30 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
         first-to-last CONV_START edge, reset = RESET-LOW duration).  The
         UI shows these values; configure_ramp() programs exactly this.
 
+        The returned :class:`ActualTiming` carries the applied window
+        geometry — ``samples_per_window`` (the CONV_START edges per
+        integration window) and ``ramp_dt_eff_us`` (the effective pulse
+        spacing).  The whole ramp path downstream consumes these instead
+        of re-deriving them from the quantized times: re-deriving is
+        lossy and the drift silently misaligns the window grid.
+
         Raises ValueError when the request cannot be represented
         (int < dt: the minimum integration is one interval = 2 pulses; or
-        dt beyond the deployed firmware's cap — see _validate_ramp_dt_us).
+        dt beyond the time range — see _validate_ramp_dt_us).
         """
         self._validate_ramp_dt_us(ramp_dt_us)
         generator = self.ramp_generator_for(ramp_dt_us)
-        clk = SYS_CLK_MHZ * 1e6
         int_cycles = math.floor(int_time_us * SYS_CLK_MHZ)
         reset_cycles = math.floor(reset_time_us * SYS_CLK_MHZ)
 
         if generator == "pio":
-            div = SYS_CLK_MHZ * ramp_dt_us / 10.0            # ideal divider
-            div_int = int(div)
-            div_frac8 = int((div - div_int) * 256.0)         # firmware truncates
-            div_actual = div_int + div_frac8 / 256.0
-            dt_eff = div_actual * 10.0e6 / clk
-            intervals = int(int_cycles * 1e6 / (clk * ramp_dt_us))
-            reset_pio = int(reset_cycles * 10.0e6 / (clk * ramp_dt_us))
-            if intervals < 1 or reset_pio < 1:
+            div_int, div_frac8, reset_pio, intervals, dt_eff = self._pio_raw_counts(
+                ramp_dt_us, int_cycles, reset_cycles
+            )
+            if intervals < 1:
                 raise ValueError(
-                    f"int={int_time_us} us must be at least one dt={ramp_dt_us} "
-                    "us interval (minimum integration = dt, 2 pulses)"
+                    f"int={int_time_us:g} us is below one dt={ramp_dt_us:g} us "
+                    "interval: the minimum integration is dt (2 pulses)"
                 )
             act_int = (intervals) * dt_eff           # first-to-last edge
             act_reset = reset_pio * dt_eff / 10.0    # RESET-LOW duration
@@ -436,8 +463,8 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
             intervals = int_cycles // dt_cycles
             if intervals < 1:
                 raise ValueError(
-                    f"int={int_time_us} us must be at least one dt={ramp_dt_us} "
-                    "us interval (minimum integration = dt, 2 pulses)"
+                    f"int={int_time_us:g} us is below one dt={ramp_dt_us:g} us "
+                    "interval: the minimum integration is dt (2 pulses)"
                 )
             act_int = intervals * dt_eff
             act_reset = reset_cycles / SYS_CLK_MHZ
@@ -450,6 +477,8 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
             reset_time_us=act_reset,
             period_us=period,
             sample_frequency_hz=freq,
+            samples_per_window=intervals + 1,
+            ramp_dt_eff_us=dt_eff,
         )
 
     def configure_ramp(self, ramp_dt_us: float, int_time_us: float, reset_time_us: float, period_us: float = None) -> bool:
@@ -483,18 +512,14 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
             return False
 
         if generator == "pio":
-            clk = SYS_CLK_MHZ * 1e6
-            div = SYS_CLK_MHZ * ramp_dt_us / 10.0
-            div_int = int(div)
-            div_frac8 = int((div - div_int) * 256.0)
-            div_actual = div_int + div_frac8 / 256.0
-            dt_eff = div_actual * 10.0e6 / clk
+            # The application path: the mirror's exact raw counts are
+            # programmed verbatim ('O') — no firmware-side rounding can
+            # disagree with what the host previewed.
             int_cycles = math.floor(int_time_us * SYS_CLK_MHZ)
             reset_cycles = math.floor(reset_time_us * SYS_CLK_MHZ)
-            intervals = int(int_cycles * 1e6 / (clk * ramp_dt_us))
-            reset_pio = int(reset_cycles * 10.0e6 / (clk * ramp_dt_us))
-            # The application path: we computed the exact raw counts, the
-            # firmware programs them verbatim ('O').
+            div_int, div_frac8, reset_pio, intervals, dt_eff = self._pio_raw_counts(
+                ramp_dt_us, int_cycles, reset_cycles
+            )
             if not self._send_command(
                 f"O {div_int},{div_frac8},{reset_pio},{intervals + 1}"
             ):
@@ -502,7 +527,7 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
         else:
             # Software generator: plain microseconds (T floors them, P is
             # cycle-floored) — nothing derived to drift.
-            dt_eff = max(1.0, math.floor(ramp_dt_us * SYS_CLK_MHZ)) / SYS_CLK_MHZ
+            dt_eff = actual.ramp_dt_eff_us
             if not self._send_command(f"T {int_time_us},{reset_time_us}"):
                 return False
             if not self._send_command(f"P {ramp_dt_us}"):
@@ -514,7 +539,16 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
     def _verify_applied_ramp(self, expected: ActualTiming, generator: str, dt_eff: float) -> bool:
         """One-time check after configure: the firmware's 'Q' status must
         report exactly the timing we computed (it is never queried for the
-        UI display — those values come from calculate_ramp_timing)."""
+        UI display — those values come from calculate_ramp_timing).
+
+        On the PIO path the pulse count is verified too: 'O' programs it
+        verbatim, so any disagreement means the generator will emit a
+        different number of CONV_START edges per window than the ramp
+        sink chunks on — the alignment bug class.  (The software path
+        skips the pulses check: the 2.1 firmware derives the pre-run 'Q'
+        display pulses from the un-floored dt, while the engine itself —
+        and this mirror — floor dt to whole cycles first; the engine
+        overwrites the display value when the run starts.)"""
         line = self._transact_line("Q")
         if not line:
             logger.warning("ramp verification skipped: no Q reply")
@@ -524,18 +558,30 @@ class PicoSerialDAQ(IDataAcquisition, ITimingController, IGainController):
                 part.split("=", 1) for part in line.split()[1:] if "=" in part
             )
             reported_gen = "pio" if fields["gen"] == "pio" else "software"
+            # Software-generator tolerance on the pre-run 'int' display:
+            # the 2.1 firmware derives the idle 'Q' pulse count from the
+            # un-floored dt while the engine (and this mirror) floor dt to
+            # whole cycles first — on interval-boundary configs the
+            # display can legitimately lag one interval behind what the
+            # engine will generate.  The engine's behaviour is the mirror,
+            # so tolerating the display artifact cannot hide a real
+            # misconfiguration.  The PIO path ('O' programs the counts
+            # verbatim) stays exact.
+            int_tol = dt_eff + 0.01 if generator != "pio" else 0.01
             ok = (
                 reported_gen == generator
-                and abs(float(fields["int"]) - expected.int_time_us) <= 0.01
+                and abs(float(fields["int"]) - expected.int_time_us) <= int_tol
                 and abs(float(fields["reset"]) - expected.reset_time_us) <= 0.01
                 and abs(float(fields["dt"]) - dt_eff) <= 0.01
             )
+            if ok and generator == "pio":
+                ok = int(fields["pulses"]) == expected.samples_per_window
             if not ok:
                 logger.error(
                     "ramp verification FAILED: expected gen=%s int=%.4f us "
-                    "reset=%.4f us dt=%.4f us, firmware Q reports %s",
+                    "reset=%.4f us dt=%.4f us pulses=%s, firmware Q reports %s",
                     generator, expected.int_time_us, expected.reset_time_us,
-                    dt_eff, line,
+                    dt_eff, expected.samples_per_window, line,
                 )
             else:
                 logger.debug("ramp verification ok: %s", line)

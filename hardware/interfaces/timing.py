@@ -10,12 +10,27 @@ class ActualTiming:
     All times are in microseconds; sample frequency is in Hertz.
 
     Supports tuple unpacking `(int_time_us, reset_time_us)` for backward compatibility.
+
+    Ramp-specific geometry (None outside ramp/markers timing): the values
+    below are the *applied* window geometry computed by the driver's exact
+    mirror — the single source of truth the whole ramp path consumes (the
+    session, the ramp sink's window size, the AQR1 header, the NI reader's
+    expected rate).  They must never be re-derived downstream by dividing
+    the quantized integration time by the requested dt: the division is
+    lossy and the drift silently misaligns the window grid.
+
+    ``samples_per_window`` is the number of CONV_START edges (samples) per
+    integration window the generator will emit — N = int/dt + 1 evaluated
+    with the applied quantization; ``ramp_dt_eff_us`` is the effective
+    pulse spacing actually generated (dt as quantized by the generator).
     """
 
     int_time_us: float
     reset_time_us: float
     period_us: float
     sample_frequency_hz: float
+    samples_per_window: Optional[int] = None
+    ramp_dt_eff_us: Optional[float] = None
 
     def __iter__(self):
         return iter((self.int_time_us, self.reset_time_us))

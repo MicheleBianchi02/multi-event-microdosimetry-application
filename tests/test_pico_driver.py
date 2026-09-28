@@ -584,3 +584,98 @@ def test_long_integration_markers_mirror(fake, driver):
 def test_dt_within_pio_bound_still_fine(fake, driver):
     actual = driver.calculate_ramp_timing(50.0, 200.0, 20.0)
     assert actual.int_time_us > 0
+
+
+# ----------------------------------------------------------------------
+# Ramp window geometry (the alignment contract of the whole ramp path):
+# the mirror is the single source of the pulses-per-window count and of
+# the effective dt; configure_ramp programs exactly these.
+# ----------------------------------------------------------------------
+
+def _q_line(actual, generator, pulses):
+    """Synthesize a firmware 'Q' reply reporting the mirror's values."""
+    return (
+        f"Q run=0 mode=ramp gen={generator} int={actual.int_time_us:.3f} "
+        f"reset={actual.reset_time_us:.3f} dt={actual.ramp_dt_eff_us:.3f} "
+        f"div=0.000 pulses={pulses} caps=000 event=ME dropped=0\n"
+    ).encode()
+
+
+def test_ramp_mirror_carries_window_geometry():
+    """samples_per_window is the pulse count the generator emits,
+    ramp_dt_eff_us the quantized dt — for both generators, including the
+    non-grid dt whose lossy re-derivation drifted the window grid."""
+    d = make_driver(FakeSerialPort())
+    pio = d.calculate_ramp_timing(7.31, 100.0066, 50.0)
+    assert pio.samples_per_window == 14          # intervals 13 + 1
+    assert pio.ramp_dt_eff_us == pytest.approx(7.309895833)
+
+    soft = d.calculate_ramp_timing(300.0066, 20_000.0, 500.0)
+    assert soft.samples_per_window == 67         # 66 intervals + 1
+    assert soft.ramp_dt_eff_us == pytest.approx(300.0)
+
+
+def test_markers_non_grid_tint_is_representable_on_the_pio_range():
+    """dt = int with a non-grid T_int <= 100 us (markers on the PIO
+    generator): cycle flooring must not reject the request — the firmware
+    clamps the zero interval to one (2 pulses), and so must the mirror."""
+    d = make_driver(FakeSerialPort())
+    actual = d.calculate_ramp_timing(99.9934, 99.9934, 5.0)
+    assert actual.samples_per_window == 2
+    assert actual.int_time_us == pytest.approx(actual.ramp_dt_eff_us)
+
+
+def test_subtick_reset_is_clamped_not_rejected():
+    """A reset shorter than one dt/10 PIO tick degenerates to one tick
+    (firmware recompute_ramp_params clamps it) — it is not an integration
+    error, and the old message blamed the integration time."""
+    d = make_driver(FakeSerialPort())
+    actual = d.calculate_ramp_timing(50.0, 1000.0, 1.5)
+    assert actual.reset_time_us == pytest.approx(5.0)  # one 5-us tick
+    assert actual.samples_per_window == 21
+
+
+@pytest.mark.parametrize(
+    "dt,int_us,reset_us",
+    [
+        (50.0, 1000.0, 100.0),       # grid dt, PIO
+        (7.31, 100.0066, 50.0),      # non-grid dt + non-grid int (the drift case)
+        (7.31, 10_000_000.0, 1000.0),  # long integration, huge pulse count
+        (99.9934, 99.9934, 5.0),     # markers, non-grid, PIO range
+        (200.0, 1000.0, 100.0),      # software generator
+    ],
+)
+def test_configure_ramp_o_counts_match_the_mirror(fake, driver, dt, int_us, reset_us):
+    """The 'O' command programs EXACTLY the mirror's geometry — the same
+    numbers the preview showed.  Feeding the mirror quantized values a
+    second time (what Apply used to do) loses one interval here."""
+    actual = driver.calculate_ramp_timing(dt, int_us, reset_us)
+    fake._status = _q_line(actual, "pio" if dt <= 100.0 else "c",
+                           actual.samples_per_window)
+    assert driver.configure_ramp(dt, int_us, reset_us) is True
+    o_cmds = [c for c in fake.commands if c.startswith("O ")]
+    if dt <= 100.0:
+        assert len(o_cmds) == 1
+        div_int, div_frac8, reset_pio, pulses = map(int, o_cmds[0][2:].split(","))
+        assert pulses == actual.samples_per_window
+        assert div_int + div_frac8 / 256.0 == pytest.approx(
+            actual.ramp_dt_eff_us * 150.0 / 10.0)
+    else:
+        # software generator: plain T + P, no O command
+        assert o_cmds == []
+        assert "P 200.0" in fake.commands
+
+
+def test_configure_ramp_verifies_pulses_via_q(fake, driver):
+    """A pulse-count disagreement is a hard configure failure: the
+    generator would emit a different number of CONV_START edges per
+    window than the ramp sink chunks on."""
+    actual = driver.calculate_ramp_timing(50.0, 1000.0, 100.0)
+    fake._status = _q_line(actual, "pio", actual.samples_per_window - 1)
+    assert driver.configure_ramp(50.0, 1000.0, 100.0) is False
+
+
+def test_int_below_dt_message_names_the_constraint():
+    d = make_driver(FakeSerialPort())
+    with pytest.raises(ValueError, match="below one dt"):
+        d.calculate_ramp_timing(50.0, 30.0, 100.0)

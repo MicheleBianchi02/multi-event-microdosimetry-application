@@ -652,6 +652,7 @@ class MeasurementController(QObject):
                 ramp_sink = self._start_ramp_storage()
             except OSError as exc:
                 logger.exception("Cannot create the ramp storage files")
+                self._close_online_csv()
                 QMessageBox.critical(
                     self.running_view, "Error",
                     f"Cannot create the ramp data files: {exc}",
@@ -664,6 +665,7 @@ class MeasurementController(QObject):
         if not success:
             if ramp_sink is not None:
                 self._stop_ramp_storage(clean=False)
+            self._close_online_csv()
             QMessageBox.critical(
                 self.running_view, "Error", "Start command failed."
             )
@@ -691,16 +693,31 @@ class MeasurementController(QObject):
         """Create the sink for the acquisition driver (or the simulator):
         ramp mode -> temp binary files + writer thread; markers mode -> the
         in-memory pair extractor (start/stop pairs only, nothing on disk —
-        they land in data.csv like a classic run)."""
+        they land in data.csv like a classic run).
+
+        The window size is the applied geometry from the timing driver's
+        exact mirror (session.samples_per_window, set at preview/Apply):
+        the number of CONV_START edges the generator emits per window.
+        Re-deriving it here as round(int/dt)+1 is lossy whenever the
+        requested dt/int quantize, and a wrong N silently shifts every
+        window pair — this is the alignment contract of the whole ramp
+        path."""
         session = self.session
         hw_mgr = self.hardware.hardware_manager
         mode = session.timing_mode
-        # markers mode is the degenerate ramp: dt = T_int -> exactly the
-        # two integration-boundary samples per window
-        dt_s = session.ramp_dt_s if mode == "ramp" else session.int_time
-        if dt_s <= 0 or session.int_time <= 0:
+        n_per_window = int(getattr(session, "samples_per_window", 0) or 0)
+        if n_per_window < 2:
+            raise OSError(
+                "invalid ramp window geometry: the window size is unknown — "
+                "apply the timing configuration before starting the measurement"
+            )
+        if session.int_time <= 0:
             raise OSError("invalid timing configuration for ramp streaming")
-        n_per_window = int(round(session.int_time / dt_s)) + 1
+        # The APPLIED dt (session.ramp_dt_s comes from the mirror's
+        # dt_eff) — what the .bin header must record for offline analysis.
+        dt_s = session.ramp_dt_s if mode == "ramp" else session.int_time
+        if dt_s <= 0:
+            raise OSError("invalid ramp dt for ramp streaming")
 
         if hw_mgr.is_loaded:
             num_channels = len(hw_mgr.active_channels)
@@ -776,6 +793,16 @@ class MeasurementController(QObject):
         (buffer -> 50 ms update loop) unchanged.  Called from the storage
         writer thread (append_batch is thread-safe)."""
         self.data_model.append_batch(pairs)
+
+    def _close_online_csv(self):
+        """Close the crash-recovery temp CSV after a failed start: an open
+        handle would keep the workspace file locked for nothing (the next
+        start reopens and truncates it)."""
+        if self._current_file is not None and not self._current_file.closed:
+            try:
+                self._current_file.close()
+            except Exception:
+                logger.exception("Could not close the online temp CSV")
 
     def _stop_ramp_storage(self, clean: bool):
         """Finalize the ramp sink after the acquisition stopped (clean) or

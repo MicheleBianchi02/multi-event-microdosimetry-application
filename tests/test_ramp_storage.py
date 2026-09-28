@@ -561,3 +561,88 @@ def test_simulated_ramp_stream_feeds_storage_end_to_end(tmp_path):
     )
     assert diff.shape == (len(pairs), 2)
     assert dm.count >= len(pairs)
+
+
+def test_recover_preserves_the_timing_mode(tmp_path):
+    """Crash recovery rewrites the header from the parsed one; the timing
+    mode arrives as the numeric CODE and the meta wants the NAME — writing
+    the code back relabeled every recovered file 'internal'."""
+    for mode_name, mode_code in (("ramp", 1), ("markers", 2)):
+        path = str(tmp_path / f".active_run.ramp.ch1.{mode_name}.bin")
+        meta = make_meta(0, "ch1", n=4, mode=mode_name)
+        blob = meta.header_bytes(samples_written=8, state=0, data_sha256=b"\x00" * 32)
+        with open(path, "wb") as f:
+            f.write(blob)
+            f.write(np.arange(8, dtype="<u4").tobytes())
+        header = recover_ramp_file(path)
+        assert header is not None
+        assert header["timing_mode"] == mode_code
+        # re-open: the on-disk header still names the run's timing mode
+        header2, _ = open_ramp_file(path)
+        assert header2["timing_mode"] == mode_code
+
+
+def test_close_returns_when_the_writer_thread_died(tmp_path):
+    """A dead writer thread (its catch-all handler exits without draining)
+    must not turn close() into a permanent hang: the sentinel put is
+    bounded, the error is recorded and the files are still finalized."""
+    import threading as _threading
+
+    from services.ramp_storage import QUEUE_DEPTH, RampStorageService
+
+    path = str(tmp_path / "ch1.bin")
+    meta = make_meta(0, "ch1", n=4)
+
+    service = RampStorageService(
+        channel_paths=[path],
+        metas=[meta],
+        index_path=str(tmp_path / "index.json"),
+        samples_per_window=4,
+        on_window_pairs=lambda pairs: None,
+    )
+    # Kill the writer: the next block write raises inside _run, the
+    # catch-all sets _error and the thread exits without draining.
+    original_write = service._writers[0].write
+    state = {"dead": False}
+
+    def dying_write(arr):
+        if state["dead"]:
+            raise RuntimeError("disk gone")
+        original_write(arr)
+
+    service._writers[0].write = dying_write
+    state["dead"] = True
+    # Fill the bounded queue to capacity: the writer dies on the first
+    # item it processes, so nothing drains it any more and an unbounded
+    # sentinel put would block forever.
+    from queue import Full
+
+    big = np.ones(8, dtype="<u4")
+    item = ("block", 0, big, 0)
+    filled = 0
+    while True:
+        try:
+            service._queue.put_nowait(item)
+            filled += 1
+        except Full:
+            break
+    assert filled >= QUEUE_DEPTH - 2  # full: the sentinel put must wait
+
+    done = _threading.Event()
+
+    def run_close():
+        service.close()
+        done.set()
+
+    _threading.Thread(target=run_close, daemon=True).start()
+    assert done.wait(timeout=30.0), "close() hung on a dead writer thread"
+    summary = service.summary()
+    assert summary["error"]  # the failure is surfaced, not swallowed
+    # the files were still finalized with a valid header (the state
+    # follows close()'s argument; the writer failure rides in the summary
+    # and the index sidecar)
+    header, _ = open_ramp_file(path)
+    assert header["state"] == 1
+    with open(str(tmp_path / "index.json")) as f:
+        import json as _json
+        assert _json.load(f)["error"]
