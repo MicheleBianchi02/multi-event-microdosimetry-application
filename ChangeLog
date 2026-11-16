@@ -1,9 +1,0 @@
-
-
-- Moved to MVC architecture
-- Added rele switching (change from single event mode to multi event mode)
-- Added Autocovariance in the result window
-- Added custom file import with setup.json file 
-- Changed saving mode (using zip file)
-- Added calibration curve
-
