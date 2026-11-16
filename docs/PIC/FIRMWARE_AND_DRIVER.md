@@ -216,8 +216,8 @@ The app always acquires in debug mode, so the applied delay is
 
 ### 2.2 Layer-1 limits and their fine print
 
-`HARDWARE_LIMITS`: integration and reset each `1 µs … 512 s` (step 1 µs),
-period derived (int + reset), **ramp sampling not supported**
+`HARDWARE_LIMITS`: integration `1 µs … 512 s`, reset `1 µs … 2 s`
+(step 1 µs), period derived (int + reset), **ramp sampling not supported**
 (`configure_ramp` returns False; the manager therefore runs a PIC-timed
 setup in `internal` mode and, on split hardware, warns that no window
 markers can be produced).
@@ -230,10 +230,11 @@ Fine print (visible in the applied-values preview):
   timer period** (there is deliberately no software prescaler on this
   phase). A request above 65536 ticks is produced as one full period
   (reload 0), i.e. ≈ 2.0007 s including the TX delay. The driver's
-  hardcoded `HARDWARE_LIMITS` and the shipped component fragment currently
-  still declare the wider 512 s envelope inherited from the integration
-  path — a pending tightening; the applied-value preview shows the
-  truncation.
+  hardcoded `HARDWARE_LIMITS` and the shipped component fragment both
+  declare the 2 s ceiling, so a config promising a longer reset is
+  refused at load time (a pre-tightening file declaring the old 512 s
+  envelope no longer loads — edit its `reset_time_us.max` down to
+  2000000).
 - **Minimum reset**: the reload is clamped to ≥ 1 tick after subtracting
   the TX delay, so the shortest reset is `TX_DELAY + 1` ticks (≈ 763 µs in
   debug two-channel mode).

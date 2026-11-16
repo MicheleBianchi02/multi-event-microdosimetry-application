@@ -54,6 +54,11 @@ class MeasurementController(QObject):
         self.starting_time = 0
         self.rate = None
         self._current_file = None
+        # Path of this run's online temp CSV (<workspace>/.active_run.csv.tmp)
+        # while it is the authoritative raw-data source for saving — NOT
+        # session.file_path, which a successful save repoints at the ZIP:
+        # feeding the ZIP back in as the CSV source destroys the archive.
+        self._online_csv_path = None
 
         # Ramp/markers streaming state (services/ramp_storage.py): the sink
         # handed to the acquisition driver, its temp paths and, after the
@@ -65,6 +70,11 @@ class MeasurementController(QObject):
         self._ramp_paths = None
         self._ramp_index_path = None
         self._ramp_summary = None
+        self._ramp_meta = None     # settings "ramp" section once published
+
+        # Live ramp analysis window (owned here: this controller holds the
+        # hardware service and the running state it must not collide with)
+        self._live_window = None
 
         self.timer = QTimer()
         self.timer.timeout.connect(self._update_loop)
@@ -113,13 +123,28 @@ class MeasurementController(QObject):
         previous_timestamp = self.timestamp
         self.timestamp = 0
 
-        # If online saving was active, flush it
-        if self._current_file is not None:
+        # Raw-data source: this run's online temp CSV while it still exists;
+        # otherwise rebuild the CSV from memory.  session.file_path must never
+        # be used here — after a successful save it IS the ZIP, and exporting
+        # would truncate the archive while re-reading it as the CSV (UPDATE
+        # FILE corrupted data.csv this way).  A mid-run write error abandoned
+        # the temp with memory still complete (_current_file None), so the
+        # partial file must not be preferred either.
+        temp_csv = None
+        if (
+            self._current_file is not None
+            and self._online_csv_path
+            and os.path.exists(self._online_csv_path)
+        ):
             if not self._current_file.closed:
                 self._current_file.flush()
-            temp_csv = self.session.file_path
-        else:
-            # We didn't save online (no workspace), so write current memory to a quick temp file
+            temp_csv = self._online_csv_path
+
+        created_temp = temp_csv is None
+        if created_temp:
+            # No usable online temp (no workspace, a mid-run write error, or
+            # a previous save consumed it): write current memory to a quick
+            # temp file
             temp_fd, temp_csv = tempfile.mkstemp(suffix=".csv")
             with os.fdopen(temp_fd, "w") as f:
                 if self.session.debug_mode:
@@ -186,6 +211,11 @@ class MeasurementController(QObject):
                         "ramp folder (they remain in the workspace as "
                         "temporary files).",
                     )
+            elif self._ramp_meta is not None:
+                # Published by an earlier save of this run: keep the archive's
+                # link to the ramp folder — the binaries did not change, only
+                # the analysis/results are being refreshed.
+                ramp_meta = self._ramp_meta
             success = DataExporter.export_to_zip(
                 session_model=self.session,
                 temp_csv_path=temp_csv,
@@ -226,8 +256,8 @@ class MeasurementController(QObject):
                 QMessageBox.critical(self.main_window, "Error", "Failed to package and save measurement.")
         finally:
             self.timestamp = previous_timestamp
-            # Clean up temporary file created if there was no active workspace
-            if self._current_file is None and os.path.exists(temp_csv):
+            # Clean up the temporary CSV written from memory above
+            if created_temp and os.path.exists(temp_csv):
                 os.remove(temp_csv)
 
     def handle_load_data(self, file_path: str):
@@ -248,7 +278,14 @@ class MeasurementController(QObject):
 
         try:
             self.running_view.init_variables()
-    
+
+            # The loaded archive replaces the measurement in memory: the
+            # online temp CSV of an earlier, unsaved run must not silently
+            # become the raw-data source of a later save of the LOADED data.
+            if not self.is_running:
+                self._current_file = None
+                self._online_csv_path = None
+
             self.session.int_time = result["int_time"]
             self.session.reset_time = result["reset_time"]
             self.session.sample_freq = result["sample_freq"]
@@ -277,6 +314,13 @@ class MeasurementController(QObject):
             # bins and the overflow mapping; legacy files fall back to 12 bit.
             self.session.adc_bits = int(result.get("adc_bits") or DEFAULT_ADC_BITS)
             self.data_model.configure_adc(self.session.adc_bits)
+            # The input range the run was measured with (B23): the running
+            # window's volt/charge scaling follows it (legacy archives
+            # without the field keep the editable spinbox default).
+            rng = (settings or {}).get("hardware_settings", {}).get(
+                "adc", {}).get("input_range_volts", {})
+            if "min_volts" in rng and "max_volts" in rng:
+                self.session.adc_input_range = (rng["min_volts"], rng["max_volts"])
             if settings:
                 # Extract timestamp from JSON
                 timestamp_iso = settings.get("measurement_info", {}).get("timestamp_start")
@@ -532,6 +576,14 @@ class MeasurementController(QObject):
         """
         Sends the start command to the hardware device and begins the measurement loop.
         """
+        if self._live_window is not None and self._live_window.is_acquiring:
+            QMessageBox.warning(
+                self.running_view, "Live Ramp Analysis",
+                "The live ramp analysis window is acquiring. Stop it before "
+                "starting a measurement.",
+            )
+            return
+
         if self.arming_istant is None or time.time() - self.arming_istant < 3:
             QMessageBox.critical(
                 self.running_view,
@@ -578,8 +630,10 @@ class MeasurementController(QObject):
         self._ramp_storage = None
         self._ramp_files = False
         self._ramp_summary = None
+        self._ramp_meta = None
         self._ramp_paths = None
         self._ramp_index_path = None
+        self._online_csv_path = None
 
         if getattr(self.session, 'active_workspace_dir', None) is None:
             self.running_view.already_saved = False
@@ -594,6 +648,7 @@ class MeasurementController(QObject):
                 
             try:
                 self._current_file = open(self.session.file_path, "w")
+                self._online_csv_path = self.session.file_path
                 self._write_data_to_file_object(self._current_file, first_line)
                 self.running_view.already_saved = False # Not fully saved yet
                 
@@ -688,6 +743,51 @@ class MeasurementController(QObject):
     # ------------------------------------------------------------------
     # Ramp-sample streaming (services/ramp_storage.py)
     # ------------------------------------------------------------------
+
+    def open_live_ramp(self):
+        """Open (or raise) the live ramp analysis window — the results-only
+        ramp campaign mode (services/live_ramp.py).  Owned here because the
+        two acquisition modes must stay mutually exclusive: the window
+        refuses to start while a measurement runs, start_device() refuses
+        the other way around.  Closing the window DISCARDS it: the next
+        open is a fresh window with every ramp, result and selection reset
+        (closing the analysis means restarting it, by design)."""
+        if self._live_window is None:
+            try:
+                from views.live_ramp_window import LiveRampWindow
+
+                self._live_window = LiveRampWindow(
+                    self.session,
+                    self.hardware,
+                    self.hardware.hardware_manager,
+                    simulate=self.simulate,
+                    is_measurement_running=lambda: self.is_running,
+                    parent=self.main_window,
+                )
+            except Exception as exc:
+                # a slot exception would otherwise only reach stderr —
+                # invisible when launched without a console (and the
+                # classic symptom of a partially synced tree)
+                logger.exception("Cannot create the live ramp analysis window")
+                QMessageBox.critical(
+                    self.running_view, "Live Ramp Analysis",
+                    f"Cannot open the live ramp analysis window:\n{exc}",
+                )
+                return
+            self._live_window.window_closed.connect(self._on_live_window_closed)
+        self._live_window.show()
+        self._live_window.raise_()
+        self._live_window.activateWindow()
+
+    def _on_live_window_closed(self):
+        window = self._live_window
+        self._live_window = None
+        if window is not None:
+            # deleteLater is Qt's own deferred deletion — safe from inside
+            # closeEvent.  (Wrapping it in a zero-shot timer kept the bound
+            # method alive past the widget's destruction and segfaulted the
+            # next event-loop pass — live regression, reverted.)
+            window.deleteLater()
 
     def _start_ramp_storage(self):
         """Create the sink for the acquisition driver (or the simulator):
@@ -840,6 +940,7 @@ class MeasurementController(QObject):
             measurement_name,
         )
         self._ramp_summary = None  # published; do not publish twice
+        self._ramp_meta = ramp_meta  # reused by later saves of the same run
         return ramp_meta
 
     def handle_stop_measurement(self):

@@ -117,9 +117,11 @@ class HardwareConfigEditorDialog(QDialog):
 
         btns = QVBoxLayout()
         self.add_device_btn = QPushButton("Add from Library…")
-        self.add_device_btn.clicked.connect(self._show_device_library_menu)
+        self.add_device_btn.clicked.connect(
+            lambda: self._show_library_menu("device", self.add_device_btn)
+        )
         add_file_btn = QPushButton("Add from File…")
-        add_file_btn.clicked.connect(self._add_device_from_file)
+        add_file_btn.clicked.connect(lambda: self._add_fragment_from_file("device"))
         self.remove_device_btn = QPushButton("Remove")
         self.remove_device_btn.clicked.connect(self._remove_device)
         save_comp_btn = QPushButton("Save as Component…")
@@ -144,15 +146,23 @@ class HardwareConfigEditorDialog(QDialog):
         self.circuit_list.currentRowChanged.connect(self._on_circuit_selected)
         left.addWidget(self.circuit_list)
         btns = QVBoxLayout()
-        add_btn = QPushButton("Add Circuit")
-        add_btn.clicked.connect(self._add_empty_circuit)
+        self.add_circuit_library_btn = QPushButton("Add from Library…")
+        self.add_circuit_library_btn.clicked.connect(
+            lambda: self._show_library_menu("circuit", self.add_circuit_library_btn)
+        )
+        add_file_btn = QPushButton("Add from File…")
+        add_file_btn.clicked.connect(lambda: self._add_fragment_from_file("circuit"))
+        add_empty_btn = QPushButton("Add Circuit")
+        add_empty_btn.clicked.connect(self._add_empty_circuit)
         self.remove_circuit_btn = QPushButton("Remove")
         self.remove_circuit_btn.clicked.connect(self._remove_circuit)
         save_comp_btn = QPushButton("Save as Component…")
         save_comp_btn.clicked.connect(lambda: self._save_component("circuit"))
-        btns.addWidget(add_btn)
-        btns.addWidget(self.remove_circuit_btn)
-        btns.addWidget(save_comp_btn)
+        for b in (
+            self.add_circuit_library_btn, add_file_btn, add_empty_btn,
+            self.remove_circuit_btn, save_comp_btn,
+        ):
+            btns.addWidget(b)
         left.addLayout(btns)
         layout.addLayout(left, 1)
 
@@ -214,16 +224,40 @@ class HardwareConfigEditorDialog(QDialog):
         channels_group = QGroupBox("Channels (a channel without circuit is inactive)")
         ch_form = QFormLayout(channels_group)
         self.ch1_circuit_combo = QComboBox()
+        self.ch1_termination = QComboBox()
         self.ch1_adc_input = QLineEdit()
         self.ch2_enable = QComboBox()
         self.ch2_enable.addItems(["single detector", "second detector (ch2)"])
         self.ch2_circuit_combo = QComboBox()
+        self.ch2_termination = QComboBox()
         self.ch2_adc_input = QLineEdit()
+        termination_tooltip = (
+            "How the channel's signal reaches the acquisition device:\n"
+            "differential (both inputs of a pair) or RSE — referenced\n"
+            "single-ended (signal vs ground). Default: differential.\n"
+            "NI USB-6451: combine with the ADC input override below to pick\n"
+            "the physical terminal — e.g. termination RSE + ADC input AI6."
+        )
+        for combo in (self.ch1_termination, self.ch2_termination):
+            combo.addItem("Differential", "differential")
+            combo.addItem("RSE (single-ended)", "rse")
+            combo.setToolTip(termination_tooltip)
         ch_form.addRow("CH1 circuit:", self.ch1_circuit_combo)
-        ch_form.addRow("CH1 ADC input (optional, e.g. ai0):", self.ch1_adc_input)
+        ch_form.addRow("CH1 termination:", self.ch1_termination)
+        self.ch1_adc_input.setToolTip(
+            "Physical input terminal of the acquisition device this channel\n"
+            "is wired to (instrument-specific; unnecessary with the\n"
+            "microcontrollers; combines with the termination above).\n"
+            "NI USB-6451: overrides the driver's default terminal for the\n"
+            "channel's termination — e.g. AI6 (rse: AI0..AI15; differential:\n"
+            "the positive of the AI<n>/AI<n+8> pair, AI0..AI7)."
+        )
+        ch_form.addRow("CH1 ADC input (terminal, optional, e.g. AI6):", self.ch1_adc_input)
         ch_form.addRow("Detector count:", self.ch2_enable)
         ch_form.addRow("CH2 circuit:", self.ch2_circuit_combo)
-        ch_form.addRow("CH2 ADC input (optional):", self.ch2_adc_input)
+        ch_form.addRow("CH2 termination:", self.ch2_termination)
+        self.ch2_adc_input.setToolTip(self.ch1_adc_input.toolTip())
+        ch_form.addRow("CH2 ADC input (terminal, optional):", self.ch2_adc_input)
         layout.addWidget(channels_group)
         layout.addStretch(1)
 
@@ -231,6 +265,7 @@ class HardwareConfigEditorDialog(QDialog):
             self.role_timing_combo, self.role_acquisition_combo,
             self.role_gain_ch1_combo, self.role_gain_ch2_combo,
             self.ch1_circuit_combo, self.ch2_circuit_combo, self.ch2_enable,
+            self.ch1_termination, self.ch2_termination,
         ):
             combo.currentIndexChanged.connect(self._on_assignment_changed)
         for line in (self.ch1_adc_input, self.ch2_adc_input):
@@ -314,6 +349,11 @@ class HardwareConfigEditorDialog(QDialog):
         readonly = QLabel(f"{device.get('driver', '?')}  (fixed by the interface)")
         readonly.setStyleSheet("color: #666;")
         form.addRow("Driver:", readonly)
+
+        fw_input = QLineEdit(str(device.get("firmware_version") or ""))
+        fw_input.setPlaceholderText("e.g. 2.2 — informational, recorded in the archives")
+        fw_input.textEdited.connect(self._on_device_firmware_changed)
+        form.addRow("Firmware version:", fw_input)
 
         connection = device.get("connection", {})
         conn_type = connection.get("type", "?")
@@ -458,6 +498,7 @@ class HardwareConfigEditorDialog(QDialog):
         self.ch2_enable.blockSignals(False)
         ch2_active = "ch2" in self._cfg.get("channels", {})
         self.ch2_circuit_combo.setEnabled(ch2_active)
+        self.ch2_termination.setEnabled(ch2_active)
         self.ch2_adc_input.setEnabled(ch2_active)
         self.role_gain_ch2_combo.setEnabled(ch2_active)
 
@@ -465,6 +506,13 @@ class HardwareConfigEditorDialog(QDialog):
             line.blockSignals(True)
             line.setText(str(self._cfg.get("channels", {}).get(channel, {}).get("adc_input") or ""))
             line.blockSignals(False)
+
+        for combo, channel in ((self.ch1_termination, "ch1"), (self.ch2_termination, "ch2")):
+            combo.blockSignals(True)
+            current = self._cfg.get("channels", {}).get(channel, {}).get("termination") or "differential"
+            index = combo.findData(current)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.blockSignals(False)
 
     def _refresh_connections(self):
         for channel, form in self.connections_forms.items():
@@ -542,34 +590,51 @@ class HardwareConfigEditorDialog(QDialog):
         if dev_id:
             self._cfg["devices"][dev_id][key] = value
 
+    def _on_device_firmware_changed(self, text):
+        dev_id = self._current_device_id()
+        if not dev_id:
+            return
+        device = self._cfg["devices"][dev_id]
+        if text.strip():
+            device["firmware_version"] = text.strip()
+        else:
+            device.pop("firmware_version", None)
+
     def _on_connection_changed(self, key, value):
         dev_id = self._current_device_id()
         if dev_id:
             self._cfg["devices"][dev_id].setdefault("connection", {})[key] = value
 
-    def _show_device_library_menu(self):
+    def _show_library_menu(self, kind: str, button):
         menu = QMenu(self)
-        by_kind = [f for f in self._fragments if f["kind"] == "device"]
+        by_kind = [f for f in self._fragments if f["kind"] == kind]
         if not by_kind:
-            menu.addAction("(no device fragments found \u2014 check hardware_library/)").setEnabled(False)
+            menu.addAction(
+                f"(no {kind} fragments found \u2014 check hardware_library/)"
+            ).setEnabled(False)
         for fragment in by_kind:
             action = menu.addAction(f"{fragment['label']}  [{fragment['suggested_id']}]")
             action.setData(fragment)
             action.triggered.connect(lambda _=False, f=fragment: self._add_fragment(f))
-        menu.exec(self.add_device_btn.mapToGlobal(self.add_device_btn.rect().bottomLeft()))
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
-    def _add_device_from_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Add Device Fragment", "", "JSON Files (*.json)")
+    def _add_fragment_from_file(self, kind: str):
+        title = "Add Device Fragment" if kind == "device" else "Add Circuit Fragment"
+        path, _ = QFileDialog.getOpenFileName(self, title, "", "JSON Files (*.json)")
         if not path:
             return
         try:
             fragment = em.load_fragment(path)
-            if fragment["kind"] != "device":
-                raise ValueError("not a device fragment")
+            if fragment["kind"] != kind:
+                raise ValueError(f"not a {kind} fragment")
         except (ValueError, OSError, json.JSONDecodeError) as e:
             QMessageBox.warning(self, "Fragment", f"Cannot load fragment:\n{e}")
             return
-        self._add_fragment({"suggested_id": fragment.get("suggested_id", "device"), "data": fragment["data"]})
+        self._add_fragment({
+            "kind": kind,
+            "suggested_id": fragment.get("suggested_id", kind),
+            "data": fragment["data"],
+        })
 
     def _add_fragment(self, fragment: dict):
         try:
@@ -759,11 +824,17 @@ class HardwareConfigEditorDialog(QDialog):
             (self.role_gain_ch2_combo, "gain_ch2"),
         ):
             em.set_role(self._cfg, role, combo.currentData())
-        em.set_channel(self._cfg, "ch1", self.ch1_circuit_combo.currentData(), self.ch1_adc_input.text().strip() or None)
+        em.set_channel(
+            self._cfg, "ch1", self.ch1_circuit_combo.currentData(),
+            self.ch1_adc_input.text().strip() or None,
+            self.ch1_termination.currentData())
         if self.ch2_enable.currentIndex() == 1:
             # enabling with no circuit chosen yet keeps the channel declared
             # but unassigned (validated as an error until a circuit is picked)
-            em.set_channel(self._cfg, "ch2", self.ch2_circuit_combo.currentData() or "", self.ch2_adc_input.text().strip() or None)
+            em.set_channel(
+                self._cfg, "ch2", self.ch2_circuit_combo.currentData() or "",
+                self.ch2_adc_input.text().strip() or None,
+                self.ch2_termination.currentData())
         else:
             em.set_channel(self._cfg, "ch2", None)
         self._refresh_assignments()

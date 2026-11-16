@@ -29,11 +29,21 @@ class HardwareService:
         self._error = False
         self._thread = None
         self._ramp_sink = None
+        self._receiving = False
+
+    @property
+    def is_receiving(self) -> bool:
+        """True between a successful start_receiving and the matching
+        stop_receiving (real acquisition and simulator alike) — the shared
+        'the stream is busy' flag that keeps the normal run and the live
+        ramp analysis mutually exclusive."""
+        return self._receiving
 
     def start_receiving(self, simulate: bool = False, rate: int = 5, ramp_sink=None) -> bool:
         self._stop_event.clear()
         self._error = False
         self._ramp_sink = ramp_sink
+        self._receiving = False
 
         if not simulate:
             if not self.hardware_manager.acquisition:
@@ -78,10 +88,12 @@ class HardwareService:
             )
             self._thread.start()
 
+        self._receiving = True
         return True
 
     def stop_receiving(self, send_stop: bool = True) -> bool:
         self._stop_event.set()
+        self._receiving = False
 
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)

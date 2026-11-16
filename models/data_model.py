@@ -93,6 +93,7 @@ class DataModel:
                 "Covariance": [0, 0, 0, 0],
                 "y_bar_d": [0, 0, 0, 0],
                 "cov_mean_sq": [0, 0, 0, 0],
+                "cov_var_ratio": [0, 0, 0, 0],
             },
             "var_autocov": {
                 "N": [0, 0, 0, 0],
@@ -101,6 +102,7 @@ class DataModel:
                 "AutoCorrelation": [0, 0, 0, 0],
                 "y_bar_d": [0, 0, 0, 0],
                 "autocov_mean_sq": [0, 0, 0, 0],
+                "autocov_var_ratio": [0, 0, 0, 0],
             },
             "var_doublecov": {
                 "N": [0, 0, 0, 0],
@@ -109,13 +111,16 @@ class DataModel:
                 "Covariance": [0, 0, 0, 0],
                 "y_bar_d": [0, 0, 0, 0],
                 "cov_mean_sq": [0, 0, 0, 0],
+                "cov_var_ratio": [0, 0, 0, 0],
             },
             "var_fft": {
                 "N": [0, 0, 0, 0],
+                "M": [0, 0, 0, 0],
                 "Mean": [0, 0, 0, 0],
                 "Variance": [0, 0, 0, 0],
                 "Covariance": [0, 0, 0, 0],
                 "y_bar_d": [0, 0, 0, 0],
+                "cov_var_ratio": [0, 0, 0, 0],
             },
         }
 
@@ -177,6 +182,7 @@ class DataModel:
                     "Covariance": [0, 0, 0, 0],
                     "y_bar_d": [0, 0, 0, 0],
                     "cov_mean_sq": [0, 0, 0, 0],
+                    "cov_var_ratio": [0, 0, 0, 0],
                 },
                 "var_autocov": {
                     "N": [0, 0, 0, 0],
@@ -185,6 +191,7 @@ class DataModel:
                     "AutoCorrelation": [0, 0, 0, 0],
                     "y_bar_d": [0, 0, 0, 0],
                     "autocov_mean_sq": [0, 0, 0, 0],
+                    "autocov_var_ratio": [0, 0, 0, 0],
                 },
                 "var_doublecov": {
                     "N": [0, 0, 0, 0],
@@ -193,13 +200,16 @@ class DataModel:
                     "Covariance": [0, 0, 0, 0],
                     "y_bar_d": [0, 0, 0, 0],
                     "cov_mean_sq": [0, 0, 0, 0],
+                    "cov_var_ratio": [0, 0, 0, 0],
                 },
                 "var_fft": {
                     "N": [0, 0, 0, 0],
+                    "M": [0, 0, 0, 0],
                     "Mean": [0, 0, 0, 0],
                     "Variance": [0, 0, 0, 0],
                     "Covariance": [0, 0, 0, 0],
                     "y_bar_d": [0, 0, 0, 0],
+                    "cov_var_ratio": [0, 0, 0, 0],
                 },
             }
 

@@ -138,10 +138,12 @@ def test_fft_block_persisted(session, tmp_path):
     results = {
         "var_fft": {
             "N": [1000, 0, 1000, 0],
+            "M": [40000, 0, 40000, 0],
             "Mean": [50.0, 0, 30.0, 0],
             "Variance": [4.1, 0, 9.2, 0],
             "Covariance": [0.1, 0, 0.2, 0],
             "y_bar_d": [0.08, 0, 0.3, 0],
+            "cov_var_ratio": [0.024, 0, 0.021, 0],
         }
     }
     csv_path = tmp_path / "run.csv"
@@ -165,6 +167,8 @@ def test_fft_block_persisted(session, tmp_path):
     assert analysis["fft"] == FFT_PARAMS
     # results travel in the same block (the fifth estimator)
     assert analysis["results"]["var_fft"]["Variance"][0] == 4.1
+    assert analysis["results"]["var_fft"]["cov_var_ratio"][0] == 0.024
+    assert analysis["results"]["var_fft"]["M"][0] == 40000
     # JSON-safety: no tuples leaked through
     json.dumps(analysis)
 

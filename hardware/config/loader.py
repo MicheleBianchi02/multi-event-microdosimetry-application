@@ -49,8 +49,16 @@ class ConfigValidationError(Exception):
 
 
 def file_sha256(path: str) -> str:
+    """sha256 of the file with CRLF normalized to LF.
+
+    Used for the hardware config: its hash must not depend on the platform
+    the file was written on (Windows text mode writes CRLF) and must equal
+    the hash of the text embedded in measurement archives (always LF —
+    Python text-mode reads translate), otherwise every cross-check
+    (workspace link, embedded provenance) fails on Windows.
+    """
     with open(path, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
+        return hashlib.sha256(f.read().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def load_hardware_config(
@@ -556,7 +564,7 @@ def _validate_semantics(config: HardwareConfig, errors: list, warnings: list) ->
             if not isinstance(dev_name, str) or not dev_name.strip():
                 errors.append(
                     f"devices.{dev_id}.connection.device: required for a "
-                    f"'daqmx' connection (the DAQmx device name, e.g. 'NI6451')"
+                    f"'daqmx' connection (the DAQmx device name, e.g. 'Dev1')"
                 )
 
     # --- channels -> circuits ---
@@ -747,6 +755,18 @@ def _validate_against_registry(
                         f"supported by acquisition driver {device.driver!r} "
                         f"(valid: {', '.join(descriptor.channel_terminations)})"
                     )
+
+        # full channel plan (terminations + optional adc_input terminal
+        # overrides) of an acquisition-role driver: the driver resolves each
+        # channel onto a physical input terminal, so an unwirable plan is a
+        # load error — better than failing at the measurement start
+        if config.roles.acquisition == dev_id and descriptor.channel_plan_validator:
+            channel_plan = [
+                (ch_id, channel.termination or "differential", channel.adc_input)
+                for ch_id, channel in config.channels.items()
+            ]
+            for error in descriptor.channel_plan_validator(channel_plan):
+                errors.append(error)
 
 
 def _check_timing_within(dev_id: str, declared: TimingCapability, hardcoded: TimingCapability, errors: list) -> None:

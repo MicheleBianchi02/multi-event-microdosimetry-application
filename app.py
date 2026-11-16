@@ -78,6 +78,13 @@ class AppController(QObject):
         # Connect Main Window events
         self.setup_controller.simulate_requested.connect(self._on_simulate_requested)
 
+        # Live ramp analysis (results-only ramp mode): the timing window's
+        # button opens the window owned by the measurement controller — it
+        # must not run while a measurement acquires and vice versa
+        setup_view.time_window.live_ramp_requested.connect(
+            self.measurement_controller.open_live_ramp
+        )
+
     def _load_hardware_config(self, path: str):
         from hardware.config import ConfigValidationError
 
@@ -394,17 +401,37 @@ class AppController(QObject):
         self.main_window.show()
 
 
-def main(simulate: bool, baud_rate: int, single_channel: bool, debug: bool = False):
+def main(simulate: bool, baud_rate: int, single_channel: bool, debug: bool = False,
+         oscilloscope: bool = False, ramp: bool | str = False):
     configure_logging(debug)
+
+    app = QApplication(sys.argv)
+    QLocale.setDefault(QLocale(QLocale.Language.English, QLocale.Country.UnitedStates))
+
+    if oscilloscope:
+        # Standalone ADC-test scope (internal clock, no measurement stack).
+        from views.oscilloscope_window import OscilloscopeWindow
+
+        scope = OscilloscopeWindow()
+        scope.show()
+        sys.exit(app.exec())
+
+    if ramp:
+        # Standalone ramp-sampling analysis (reads published AQR1 files:
+        # window browser, derivatives, ensemble-averaged spectrum).
+        from views.ramp_analysis_window import RampAnalysisWindow
+
+        path = ramp if isinstance(ramp, str) else None
+        viewer = RampAnalysisWindow(path)
+        viewer.show()
+        sys.exit(app.exec())
+
     logger.debug(
         "Starting application: simulate=%s baud_rate=%s single_channel=%s",
         simulate,
         baud_rate,
         single_channel,
     )
-
-    app = QApplication(sys.argv)
-    QLocale.setDefault(QLocale(QLocale.Language.English, QLocale.Country.UnitedStates))
 
     controller = AppController(simulate, baud_rate, single_channel)
     controller.run()
@@ -419,12 +446,16 @@ if __name__ == "__main__":
     parser.add_argument("-s", "--simulate", action="store_true", default=False)
     parser.add_argument("-b", "--baud-rate", action="store", default=115200, type=int)
     parser.add_argument("-c", "--single-channel", action="store_true", default=False)
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        default=False,
-        help="Enable debug logging to stderr",
-    )
+    parser.add_argument("--debug", action="store_true", default=False,
+                        help="Enable debug logging to stderr")
+    parser.add_argument("--oscilloscope", action="store_true", default=False,
+                        help="Standalone oscilloscope for ADC testing "
+                             "(USB-6451, internal clock, 1 MS/s)")
+    parser.add_argument("--ramp", nargs="?", const=True, default=None, metavar="PATH",
+                        help="Standalone ramp-sampling analysis of published ramp "
+                             "files (window browser, derivatives, averaged FFT); "
+                             "PATH = a workspace, a measurement ZIP or a ramp folder")
     args = parser.parse_args()
 
-    main(args.simulate, args.baud_rate, args.single_channel, args.debug)
+    main(args.simulate, args.baud_rate, args.single_channel, args.debug,
+         args.oscilloscope, args.ramp)

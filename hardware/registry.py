@@ -65,6 +65,7 @@ def _register(cls, code: str, factory: Callable[[dict, DeviceConfig], Any] = Non
         acq_max_channels=getattr(cls, "MAX_CHANNELS", None),
         acq_max_rate_hz=getattr(cls, "MAX_RATE_HZ", None),
         channel_terminations=getattr(cls, "CHANNEL_TERMINATIONS", None),
+        channel_plan_validator=getattr(cls, "validate_channel_plan", None),
     )
     return RegisteredDriver(
         driver_class=cls,

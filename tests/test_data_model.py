@@ -98,3 +98,4 @@ def test_debug_batch_returns_raw_start_stop_and_difference():
     # The ROI is applied only to the filtered view / statistics
     assert np.isnan(dm.filtered_data[0, 0])
     assert dm.result["var"]["N"][0] == 0  # ch1 has no ROI-surviving sample
+

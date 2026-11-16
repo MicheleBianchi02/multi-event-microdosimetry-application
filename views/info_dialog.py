@@ -1,6 +1,8 @@
 import json
 
 from PyQt6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
     QDialog,
     QFormLayout,
     QFrame,
@@ -82,17 +84,31 @@ class InfoDialog(QDialog):
         self.det_voltage_input = QLineEdit()
         self.depth_input = QLineEdit()
 
-        # Applied gain: read-only snapshot (chosen in the wizard, applied to
-        # the hardware before the measurement started)
-        self.ch1_gain_label = QLabel()
-        self.ch1_gain_label.setStyleSheet("color: #555;")
-        self.ch2_gain_label = QLabel()
-        self.ch2_gain_label.setStyleSheet("color: #555;")
+        # Applied gain: the gpio mask is a read-only snapshot (chosen in the
+        # wizard, applied to the hardware before the measurement started).
+        # The gain selection itself can be re-picked from the loaded
+        # hardware config's gain table — for archives measured before the
+        # gain was recorded (or with another bench), so the recorded mask +
+        # capacitance pair is a real option of the config. Each option shows
+        # its total capacitance next to the gain label.
+        self.ch1_mask_label = QLabel()
+        self.ch1_mask_label.setStyleSheet("color: #555;")
+        self.ch2_mask_label = QLabel()
+        self.ch2_mask_label.setStyleSheet("color: #555;")
+        self.ch1_gain_input = QComboBox()
+        self.ch2_gain_input = QComboBox()
+        for combo in (self.ch1_gain_input, self.ch2_gain_input):
+            combo.setToolTip(
+                "Pick the gain that was applied for this measurement from "
+                "the loaded hardware configuration's gain table (the total "
+                "capacitance is shown next to each gain). The mask and "
+                "capacitance are saved together into the archive's "
+                "hardware snapshot on the next save; the capacitance also "
+                "feeds the counts→charge conversion."
+            )
 
         self.meas_note_input = QTextEdit()
         self.meas_note_input.setMaximumHeight(60)
-
-        from PyQt6.QtWidgets import QCheckBox
 
         self.is_problematic_input = QCheckBox()
         self.is_problematic_input.stateChanged.connect(self.on_meta_edit)
@@ -105,13 +121,30 @@ class InfoDialog(QDialog):
         ]:
             w.textEdited.connect(self.on_meta_edit)
         self.meas_note_input.textChanged.connect(self.on_meta_edit)
+        # activated, not currentIndexChanged: it fires on every USER pick,
+        # including re-picking the already-selected item — with a single
+        # gain option (e.g. no wiring: fixed capacitance only) the index
+        # never changes, and the selection must still be applied
+        self.ch1_gain_input.activated.connect(
+            lambda *_: self.on_gain_selected(1)
+        )
+        self.ch2_gain_input.activated.connect(
+            lambda *_: self.on_gain_selected(2)
+        )
 
         meta_form.addRow("Beam Energy (MeV):", self.beam_energy_input)
         meta_form.addRow("Beam Current (nA):", self.beam_current_input)
         meta_form.addRow("Detector Voltage (V):", self.det_voltage_input)
         meta_form.addRow("Depth (cm):", self.depth_input)
-        meta_form.addRow("CH1 Gain:", self.ch1_gain_label)
-        meta_form.addRow("CH2 Gain:", self.ch2_gain_label)
+
+        ch1_gain_row = QHBoxLayout()
+        ch1_gain_row.addWidget(self.ch1_mask_label)
+        ch1_gain_row.addWidget(self.ch1_gain_input)
+        ch2_gain_row = QHBoxLayout()
+        ch2_gain_row.addWidget(self.ch2_mask_label)
+        ch2_gain_row.addWidget(self.ch2_gain_input)
+        meta_form.addRow("CH1 Gain:", ch1_gain_row)
+        meta_form.addRow("CH2 Gain:", ch2_gain_row)
         meta_form.addRow("Problematic Measurement:", self.is_problematic_input)
         meta_form.addRow("Measurement Note:", self.meas_note_input)
 
@@ -154,12 +187,58 @@ class InfoDialog(QDialog):
         btn_layout.addWidget(close_btn)
         main_layout.addLayout(btn_layout)
 
-    def _gain_text(self, gpio_mask, capacitance):
+    def _populate_gain_combo(self, combo: QComboBox, channel: int, labels=None):
+        """Fill one gain combo from the hardware config's gain table,
+        showing each option's total capacitance next to its label.
+
+        Pre-selects the option matching the session's applied gain (mask
+        first, capacitance as fallback); archives without a recorded gain
+        show a '(not recorded)' placeholder until the user picks one.
+        `labels` restricts the choices (ganged-pin compatibility)."""
+        manager = self.hardware_manager
+        combo.blockSignals(True)
+        combo.clear()
+        if manager is None or not manager.is_loaded:
+            cap = getattr(
+                self.session, f"capacitance_pf_ch{'1' if channel == 1 else '2'}", 0.0
+            )
+            combo.addItem(f"{cap:g} pF (no hardware config loaded)", None)
+            combo.setEnabled(False)
+            combo.blockSignals(False)
+            return
+        combo.setEnabled(True)
+
+        mask = getattr(self.session, f"gpio_mask_ch{'1' if channel == 1 else '2'}")
+        cap = getattr(self.session, f"capacitance_pf_ch{'1' if channel == 1 else '2'}")
+        selected_label = None
+        if labels is None:
+            labels = manager.get_gain_labels(channel)
+        for label in labels:
+            option_cap = manager.get_capacitance(channel, label)
+            option_mask = manager.get_gain_mask(channel, label)
+            if selected_label is None:
+                if mask is not None and option_mask == list(mask):
+                    selected_label = label
+                elif mask is None and cap and option_cap == cap:
+                    selected_label = label
+            combo.addItem(f"{label} — {option_cap:g} pF", label)
+        if selected_label is None:
+            placeholder = (
+                "— gain not recorded —"
+                if mask is None
+                else f"— recorded gain not in the table ({cap:g} pF) —"
+            )
+            combo.insertItem(0, placeholder, None)
+            combo.setCurrentIndex(0)
+        else:
+            combo.setCurrentIndex(combo.findData(selected_label))
+        combo.blockSignals(False)
+
+    def _mask_text(self, gpio_mask):
         if gpio_mask is None:
-            return "N/A"
+            return "mask: N/A"
         bits = "".join("1" if b else "0" for b in gpio_mask)
-        c = f" ({capacitance:g} pF)" if capacitance else ""
-        return f"mask {bits}{c}"
+        return f"mask {bits}"
 
     def populate_fields(self):
         self.blockSignals(True)
@@ -188,12 +267,23 @@ class InfoDialog(QDialog):
         self.beam_current_input.setText(str(self.session.beam_current_na))
         self.det_voltage_input.setText(str(self.session.detector_voltage_v))
         self.depth_input.setText(str(self.session.depth_cm))
-        self.ch1_gain_label.setText(
-            self._gain_text(self.session.gpio_mask_ch1, getattr(self.session, "capacitance_pf_ch1", None))
+        self.ch1_mask_label.setText(
+            self._mask_text(self.session.gpio_mask_ch1)
         )
-        self.ch2_gain_label.setText(
-            self._gain_text(self.session.gpio_mask_ch2, getattr(self.session, "capacitance_pf_ch2", None))
+        self.ch2_mask_label.setText(
+            self._mask_text(self.session.gpio_mask_ch2)
         )
+        manager = getattr(self, "hardware_manager", None)
+        loaded = manager is not None and manager.is_loaded
+        self._populate_gain_combo(self.ch1_gain_input, 1)
+        if loaded and self.session.gpio_mask_ch1 is not None:
+            ch1_label = self.ch1_gain_input.currentData()
+            ch2_labels = manager.get_compatible_gain_labels(2, ch1_label)
+        else:
+            ch2_labels = None
+        self._populate_gain_combo(self.ch2_gain_input, 2, labels=ch2_labels)
+        if not getattr(self.session, "multiple_channel", True):
+            self.ch2_gain_input.setEnabled(False)
 
         self.is_problematic_input.blockSignals(True)
         self.is_problematic_input.setChecked(
@@ -254,3 +344,30 @@ class InfoDialog(QDialog):
 
         self.session.is_problematic = self.is_problematic_input.isChecked()
         self.session.measurement_note = self.meas_note_input.toPlainText()
+
+    def on_gain_selected(self, channel: int):
+        """Apply a picked gain option to the session: gpio mask AND total
+        capacitance travel together, so the archive's hardware snapshot
+        stays a physically realizable pair from the config's gain table."""
+        manager = self.hardware_manager
+        if manager is None or not manager.is_loaded:
+            return
+        combo = self.ch1_gain_input if channel == 1 else self.ch2_gain_input
+        label = combo.currentData()
+        if not label:
+            return  # placeholder / no selection
+        mask = manager.get_gain_mask(channel, label)
+        cap = manager.get_capacitance(channel, label)
+        if channel == 1:
+            self.session.gpio_mask_ch1 = mask
+            self.session.capacitance_pf_ch1 = cap
+            self.ch1_mask_label.setText(self._mask_text(mask))
+            # ganged pins: restrict CH2 to the physically compatible gains
+            self._populate_gain_combo(
+                self.ch2_gain_input, 2,
+                labels=manager.get_compatible_gain_labels(2, label),
+            )
+        else:
+            self.session.gpio_mask_ch2 = mask
+            self.session.capacitance_pf_ch2 = cap
+            self.ch2_mask_label.setText(self._mask_text(mask))

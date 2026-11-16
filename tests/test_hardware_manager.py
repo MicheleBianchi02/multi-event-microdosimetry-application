@@ -410,7 +410,7 @@ def _pic_bench(two_channel: bool) -> dict:
             "capabilities": {
                 "timing": {
                     "integration_time_us": {"min": 1, "max": 512_000_000, "step": 1},
-                    "reset_time_us": {"min": 1, "max": 512_000_000, "step": 1},
+                    "reset_time_us": {"min": 1, "max": 2_000_000, "step": 1},
                     "period_us": None,
                     "ramp_sampling": {"supported": False},
                 },
@@ -471,6 +471,22 @@ def test_manager_injects_channel_count_into_pic_quantization(tmp_path):
     act_double = double.calculate_actual_timing(30_000, 500)
     # bin underflows the 24-tick double-channel delay: 25 ticks
     assert act_double.reset_time_us == pytest.approx(762.939453125)
+
+
+def test_pic_reset_envelope_beyond_the_2s_firmware_ceiling_is_rejected(tmp_path):
+    """The reset phase spans a single 16-bit timer period (65536/32768 Hz =
+    2 s, by design — no TMR1U prescaler on this phase). A config declaring a
+    wider envelope must be refused at load time instead of letting every
+    request silently truncate to ~2 s."""
+    from hardware.config.loader import ConfigValidationError
+
+    cfg = _pic_bench(two_channel=False)
+    cfg["devices"]["pic_1"]["capabilities"]["timing"]["reset_time_us"]["max"] = 512_000_000
+    manager = HardwareManager()
+    with pytest.raises(ConfigValidationError) as excinfo:
+        manager.load_config(_write(tmp_path, "pic_wide_reset.json", cfg))
+    assert "reset_time_us" in "\n".join(excinfo.value.errors)
+    assert "exceeds the hardware limits" in "\n".join(excinfo.value.errors)
 
 
 def _write(tmp_path, name: str, cfg: dict) -> str:

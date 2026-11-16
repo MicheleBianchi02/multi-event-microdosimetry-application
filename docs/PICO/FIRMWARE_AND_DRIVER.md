@@ -1,4 +1,4 @@
-# PICO2DAQ 2.1 — firmware internals and the `pico_serial_v1` driver
+# PICO2DAQ 2.5 — firmware internals and the `pico_serial_v1` driver
 
 This document describes **how the Pico 2 DAQ works internally** — the
 firmware's dual-core architecture, its timing engines and its electrical
@@ -6,23 +6,28 @@ interfaces — and then, in the same document, **the application driver**
 (`pico_serial_v1`, `hardware/pico/pico_daq.py`) that commands it: its exact
 timing mirror, its concurrency model and its error handling.
 
-- Firmware source: [v2.1/main.c](v2.1/main.c), [v2.1/ramp_control.pio](v2.1/ramp_control.pio),
-  [v2.1/CMakeLists.txt](v2.1/CMakeLists.txt)
+- Firmware source: [v2.2/main.c](v2.2/main.c), [v2.2/ramp_control.pio](v2.2/ramp_control.pio),
+  [v2.2/ramp_fixed.pio](v2.2/ramp_fixed.pio), [v2.2/ramp_transient.pio](v2.2/ramp_transient.pio),
+  [v2.2/ramp_transient_reset.pio](v2.2/ramp_transient_reset.pio),
+  [v2.2/CMakeLists.txt](v2.2/CMakeLists.txt)
 - Protocol/pin-map quick reference: [README.md](README.md) (this file is the
   deep dive; the README stays the compact reference)
 - Driver source: `hardware/pico/pico_daq.py`; driver tests: `tests/test_pico_driver.py`
 
 ---
 
-## Part 1 — The firmware (PICO2DAQ 2.1)
+## Part 1 — The firmware (PICO2DAQ 2.5)
 
 ### 1.1 Platform and build
 
 - Target: Raspberry Pi **Pico 2** — RP2350, dual **Cortex-M33** at
   **150 MHz** (the system clock is read at runtime and reported, never
   assumed).
-- Peripherals used: the RP2350 **ADC** (12-bit, GP26 = channel 0), one **PIO**
-  state machine (ramp trigger generator), the **DWT cycle counter**
+- Peripherals used: the RP2350 **ADC** (12-bit, GP26 = channel 0), two
+  **PIO** state machines of pio0 (SM0: dt-scaled ramp generator; SM1:
+  fixed-clock ramp generator — both programs fit in the block's 32 shared
+  instructions) plus one SM of **pio1** (transient-test generator; pio0's
+  instruction memory is full) — only one SM ever runs, the **DWT cycle counter**
   (`CYCCNT`, the sub-microsecond timing backbone), the **SIO** GPIO block
   (single-cycle pin writes from both cores), **USB CDC** (`stdio`), and the
   64-bit unique board id.
@@ -48,10 +53,10 @@ USB endpoint.
   targets (`wait_until_cycle` compares `(CYCCNT − target) > 2³¹`, so the
   32-bit wrap is handled): every edge re-synchronizes to an absolute
   timeline instead of accumulating relative delays — jitter never adds up.
-- Entry point dispatches on `sys_cfg.is_ramp_mode` / `ramp_gen_pio` between
-  the three engines below. When idle it spins on `tight_loop_contents()`;
-  between runs the integrator reset line is held LOW (capacitor discharged —
-  this is why the driver's `arm()` is a no-op).
+- Entry point dispatches on `sys_cfg.is_ramp_mode` / `sys_cfg.ramp_gen`
+  between the four engines below. When idle it spins on
+  `tight_loop_contents()`; between runs the integrator reset line is held
+  LOW (capacitor discharged — this is why the driver's `arm()` is a no-op).
 
 **Core 0 — USB engine** (`main` loop):
 
@@ -108,7 +113,7 @@ Properties:
 - On stop (`is_running` cleared by core 0) the engine forces RESET low
   (safe state) and pushes the end-of-stream marker.
 
-#### Ramp mode, PIO generator (`run_ramp_pio_mode` + `ramp_control.pio`)
+#### Ramp mode, dt-scaled PIO generator (`run_ramp_pio_mode` + `ramp_control.pio`, `GP`)
 
 Zero-CPU hardware generation of the CONV_START pulse train for an external
 digitizer (the NI card). The PIO program (`side-set` drives the reset line,
@@ -136,10 +141,99 @@ levels. In this mode **no ADC sampling happens** — the Pico's single ADC
 cannot acquire while its pins generate triggers
 (`SUPPORTS_RAMP_WHILE_ACQUIRING = False`).
 
+#### Ramp mode, fixed-clock PIO generator (`run_ramp_fixed_mode` + `ramp_fixed.pio`, `GF`)
+
+The same v2 process on a **second state machine (pio0 SM1)** whose clock is
+fixed at clk_sys (divider 1) and whose reset (**5 µs = 750 cycles**) and
+settle (**2 µs = 300 cycles**) are immediate-coded delay loops in the
+program. Freeing those phases from any register is what leaves room for
+the dt: the half-period count lives in the SM's **ISR** and the pulse count
+in the **OSR** (re-read every cycle by `mov y, osr`, which never shifts the
+OSR — the same trick the dt-scaled program uses):
+
+1. **Pull phase**: core 1 pushes `half` and `pulses − 1` into the TX FIFO.
+2. **Reset phase**: fixed counted loop holds RESET **LOW** exactly 750
+   sys-clock cycles.
+3. **Settle**: RESET released for exactly 150 cycles, reloading the pulse
+   count from the OSR meanwhile.
+4. **Pulse train**: `pulses` iterations of
+   rising-edge / counted-high / falling-edge / counted-low —
+   **2·half + 7 sys-clock cycles per pulse** — rising edges at exactly
+   0, dt, 2·dt, …, (N−1)·dt; the last pulse runs out and the program
+   `.wrap`s to the reset phase.
+
+Properties that follow:
+
+- **Zero jitter**: the divider is an integer (1) — the dt-scaled
+  generator's fractional 16.8 divider jitters every edge by up to one
+  sys clock.
+- **One-cycle dt resolution with no dt-coupled quantization**: dt rounds
+  UP to the (2·half + 7)-cycle grid (6.67 ns at 150 MHz — the same grid
+  as the software generator, odd-only, so an even request lands one
+  cycle above; the applied dt is never faster than requested, which
+  keeps a rate-limited clock consumer such as the NI 1 MS/s card inside
+  spec); the reset and settle
+  do **not** scale with dt, so the 2·dt dead time becomes a fixed 2 µs
+  and the reset is exactly 5 µs instead of a dt/10-quantized phase.
+- **No dt upper bound**: a 32-bit half covers far beyond the 10 s time
+  range — this generator also serves markers mode (dt = T_int) at zero
+  CPU load.
+- **150 MHz only**: the reset/settle immediates do not scale with the
+  system clock, so `GF` and `F` are rejected on any other clock.
+
+Duty is 50 % ± 1 cycle (only rising edges matter to the digitizer). The
+pin claiming/pindirs/hand-back dance is identical to the dt-scaled
+generator; the two SMs are never enabled together.
+
+#### Transient-test mode (`run_ramp_transient_mode` + `ramp_transient.pio`, `GT`)
+
+The study mode for the front-end transient: the dt-scaled program's
+architecture with the clock **pinned by an integer divider**
+(`TRANSIENT_DIV` = 16 at 150 MHz — zero jitter; one tick = 16/150 µs ≈
+106.7 ns, one pulse = 10 ticks = **1.0667 µs = 937.5 kS/s**) on a state
+machine of **pio1**. Divider 15 would give exactly 1.000 µs — the
+acquisition card's absolute 1 MS/s spec with zero margin, and any
+positive crystal error of the nominal 150 MHz clocks it above spec (the
+B35 failure class; the fixed generator is derated for the same reason) —
+hence 16, and the applied (not nominal) dt is shown by the app's
+true-values card. With dt riding on the fixed clock, both registers
+carry run parameters: core 1 pushes the reset phase in ticks (ISR — the
+phase is `pushed + 2` cycles, so the firmware pushes `reset_ticks − 2`)
+and the pulse count (OSR). The settle between the reset release and the
+first CONV_START edge is **one ~107 ns tick** (`mov y, osr side 1`,
+first `set pins, 1` the next cycle), and each pulse is 10 cycles. The
+reset is sweepable down to 1 µs — deliberately below the validated
+measurement minimum; the app exposes it as an explicit test option
+(never auto-selected) with its own mirror
+(`calculate_transient_timing`) and raw command (`A <reset_ticks>,<pulses>`,
+verified exactly via `Q`'s `gen=tpio` including the pulse count).
+
+#### Reset-sampling transient-test mode (`run_ramp_transient_reset_mode` + `ramp_transient_reset.pio`, `GR`)
+
+The transient study's other half, on pio1 SM1: the same pinned-divider
+clock (16 at 150 MHz, zero jitter, ~107 ns ticks), but the pulse train
+runs with **side 0** — the CONV_START pulses are generated *during* the
+reset phase, the first edge simultaneous with the reset assertion, so
+the digitizer captures the integrator's discharge from its start. The
+integration phase is silent (reset HIGH, counted in ticks: the phase has
+a fixed 3-cycle overhead, so `B` programs `int_ticks` and the firmware
+pushes `int_ticks − 3`). Register budget: ISR = the reset-phase pulse
+count (the reset lasts exactly pulses × 1.0667 µs — the counter is
+reloaded at the *end* of the integration phase, which is why no cycle is
+lost inside the reset phase), OSR = the integration ticks. The app
+exposes it as the *Sample During Reset* study option (fields swapped);
+`Q` reports `gen=rpio` with reset = pulses·dt and
+int = ticks·dt/10.
+
 #### Ramp mode, software generator (`run_ramp_soft_mode`, selected with `GC`)
 
-The same v2 process (reset LOW → settle → N pulses at k·dt → last period
-runs out → restart) driven from the timing core with DWT absolute anchors:
+The same v2 process (reset LOW → settle → N pulses at k·dt → restart)
+driven from the timing core with DWT absolute anchors. Since 2.4 the
+cycle restarts right after the LAST pulse's short high
+(min(dt/2, `RAMP_SOFT_LAST_HIGH_US` = 1 µs)) instead of running its low
+half out — the trailing low half was pure dead time and, in markers mode
+(dt = T_int), doubled the period. Edge positions and the pulse count are
+unchanged; dt ≤ 2 µs runs keep the exact old waveform:
 
 - dt, reset and settle quantize to **one system clock cycle** (6.67 ns at
   150 MHz); there is **no dt-coupled quantization and no dt upper bound**.
@@ -152,16 +246,17 @@ runs out → restart) driven from the timing core with DWT absolute anchors:
   integrations (dt = T_int, two CONV_START edges per window) — see the
   driver's generator auto-selection.
 
-#### Parameter programming: the `O` command vs `T`/`P`
+#### Parameter programming: the `O`/`F` commands vs `T`/`P`
 
-The raw PIO parameters (`div_int, div_frac8, reset_pio, pulses`) stored in
-`sys_cfg` are the single source of truth for the PIO engine. They are set
+The raw generator parameters (`div_int, div_frac8, reset_pio, pulses` for
+the dt-scaled PIO; `half, pulses` for the fixed-clock PIO) stored in
+`sys_cfg` are the single source of truth for their engines. They are set
 either by `recompute_ramp_params()` (from `T`/`P`, the manual bench path,
-double-precision math) or — **the application path** — by the `O` command,
-which programs host-computed raw counts *verbatim*, so no firmware-side
-rounding can disagree with what the host previewed. `O` recomputes the
-effective `int/reset/dt` display fields from the raw counts, so `Q` stays
-truthful in both paths.
+double-precision math) or — **the application path** — by the `O`/`F`
+commands, which program host-computed raw counts *verbatim*, so no
+firmware-side rounding can disagree with what the host previewed. Both
+recompute the effective `int/reset/dt` display fields from the raw counts,
+so `Q` stays truthful in every path.
 
 ### 1.4 Timing summary and limits
 
@@ -175,8 +270,10 @@ reset + settle + N·dt with N = T_int/dt + 1.
 |---|---|---|
 | integration time | 5 µs … 10 s | `T` validation (ADC conversion ≈ 2 µs + margin) |
 | reset time | 5 µs … 10 s | `T` validation |
+| ramp dt, fixed-clock PIO generator | > 0 … 10 s | `P` validation (one-cycle grid, no dt-coupled bound); `F` trusts the host; generator rejected off-150 MHz |
 | ramp dt, software generator | > 0 … 10 s | `P` validation |
-| ramp dt, PIO generator | > 0 … 65536·10/clk ≈ 4369 µs | `P` validation; `O` trusts the host |
+| ramp dt, dt-scaled PIO generator | > 0 … 65536·10/clk ≈ 4369 µs | `P` validation; `O` trusts the host |
+| reset time, transient test (`GT`) | 1 µs … 10 s (~107 ns steps) | `A`/recompute; a study mode below the validated minimum |
 
 These bounds must be mirrored by the driver's `HARDWARE_LIMITS` (they are).
 
@@ -202,12 +299,13 @@ window extractor rely on.
 
 > **Edge-time footnote (markers mode).** The "0" of the edge train is the
 > *pulse-train* start, which begins one settle after the reset release:
-> 2 µs (software generator) or 2·dt (PIO generator, whose settle is 20 PIO
-> cycles). In markers mode with the PIO generator and T_int ≤ 100 µs the
-> two edges therefore sit at 2·T_int and 3·T_int after GP14 rises — the
-> pair still spans exactly T_int (the measurement is unaffected; both
-> samples lie on the same linear ramp), but the absolute edge phase
-> differs from the naive "at 0 and T_int" reading.
+> 2 µs (fixed-clock and software generators) or 2·dt
+> (dt-scaled PIO generator, whose settle is 20 PIO cycles). In markers
+> mode with the dt-scaled PIO generator and T_int ≤ 100 µs the two edges
+> therefore sit at 2·T_int and 3·T_int after GP14 rises — the pair still
+> spans exactly T_int (the measurement is unaffected; both samples lie on
+> the same linear ramp), but the absolute edge phase differs from the
+> naive "at 0 and T_int" reading.
 
 ---
 
@@ -231,13 +329,17 @@ mapping) and immediately runs the **`V` identity handshake**:
   whole timing mirror below assumes 150 MHz, and a bare Pico / wrong board /
   reflashed clock would silently rescale every period.
 
-The parsed identity is kept (`driver.identity`). **PICO2DAQ 2.1 is the
-required firmware**: the handshake confirms the firmware *name* and the
-150 MHz clock but does not gate on the version number — the driver simply
-assumes 2.1's behaviour (in particular the software generator's dt being
-bounded only by the general time range), and the hardware configuration
-records `firmware_version: "2.1"` as required. Boards still running 2.0
-must be reflashed.
+The parsed identity is kept (`driver.identity`). **PICO2DAQ 2.5 is the
+required firmware**: the handshake confirms the firmware *name*, a version
+≥ 2.5 and the 150 MHz clock. The version gate exists because the driver
+assumes the newest generator behaviour (2.5 fixed the software generator's
+reset phase — the early wrap left a stale DWT anchor that ran reset for up
+to one dt; 2.4 shortened its period; 2.3 added the transient-test
+generators `GT`/`A`/`GR`/`B` and moved the fixed generator's settle to
+2 µs; 2.2 added `GF`/`F`) — an older board would silently run different
+timing than the mirror reports. Boards still running 2.4 or older must be
+reflashed, and the hardware configuration records
+`firmware_version: "2.5"` as required.
 
 ### 2.2 Layer-1 limits (hardcoded, mirrored from the firmware)
 
@@ -258,13 +360,14 @@ SUPPORTS_RAMP_WHILE_ACQUIRING = False   # one ADC: triggers and sampling
 Every mutating call re-validates against these bounds and **rejects** (never
 clamps) out-of-range values. The hardware config's declared envelope is
 checked against them at load time (registry descriptor). The ramp-dt limit
-(`RAMP_DT_MAX_US = 10 s`) is simply the general time range: the software
-generator — the application's path for dt > 100 µs — has one-clock-cycle
-resolution and no dt-coupled bound, and the auto-selection never drives the
-PIO past 100 µs, so the PIO's 16.8-divider constraint (≈ 4369 µs) is
+(`RAMP_DT_MAX_US = 10 s`) is simply the general time range: the fixed-clock
+and software generators — the app paths for any dt when reset = 5 µs, and
+for dt > 100 µs otherwise — have one-clock-cycle resolution and no
+dt-coupled bound, and the auto-selection never drives the dt-scaled PIO
+generator past 100 µs, so its 16.8-divider constraint (≈ 4369 µs) is
 trivially satisfied. `_validate_ramp_dt_us()` is therefore a plain range
-check (0 < dt ≤ 10 s). Support for firmware 2.0 (the version-gated dt
-bound) has been removed; 2.1 is required.
+check (0 < dt ≤ 10 s). Support for firmware older than 2.5 has been
+removed; 2.2 is required.
 
 ### 2.3 Command plumbing
 
@@ -287,7 +390,7 @@ bound) has been removed; 2.1 is required.
 | `set_event_mode(se)` | `RS` (SE) / `RM` (ME) → `D` | the SE/ME line belongs to the gain role |
 | `configure_noramp(int, reset)` | `XN` then `T int,reset` → `D` | validates limits; ignores a `period_us` argument (the firmware derives the period) |
 | `calculate_actual_timing(...)` | **no traffic** | pure mirror: `floor(us · 150)/150` µs per time, period = int + reset, freq = 1/period |
-| `configure_ramp(dt, int, reset)` | `XR`, `GP`/`GC`, then `O …` or `T`+`P` | see §2.5 |
+| `configure_ramp(dt, int, reset)` | `XR`, `GF`/`GP`/`GC`, then `F …`/`O …` or `T`+`P` | see §2.5 |
 | `set_mode(debug)` | none | **no-op**: the firmware always transmits start/stop; the operational difference is derived by the driver on receipt |
 | `set_channels(multiple)` | none | **no-op**: single-ADC firmware; the channel count comes from the config |
 | `arm()` | none | **no-op**: while idle the engine holds the integrator in reset, and every run opens with a clean reset→settle→sample sequence |
@@ -296,37 +399,67 @@ bound) has been removed; 2.1 is required.
 | `start_measurement(session, data_model, ramp_sink)` | `S` + stream | refuses a `ramp_sink` (see §2.7) and a double start; spawns the reader thread |
 | `stop_measurement()` | `E` → marker → `D` | see §2.6 |
 
-### 2.5 Ramp configuration: the exact mirror and the `O` path
+### 2.5 Ramp configuration: the exact mirror and the `O`/`F` paths
 
 `calculate_ramp_timing(dt, int, reset)` is a **pure computation** that
 reproduces bit-exactly what the firmware will generate — the same numbers
 its `Q` command reports — and decides *representability*:
 
-- **Generator auto-selection**: dt ≤ **100 µs** → PIO (`GP`), otherwise
-  software (`GC`) — a bench-measured crossover: below the threshold the
-  PIO's hardware-perfect edges win despite the dt/10 tick quantization,
-  above it the software engine's one-cycle resolution wins.
-- **PIO path** (`div = 150e6 · dt / 1e7`, 16.8 split with truncation as the
-  firmware does; `dt_eff = div_actual · 10 µs/…`; `intervals =
+- **Generator auto-selection**: reset quantizing to exactly **5 µs** (the
+  firmware minimum) → fixed-clock PIO (`GF`) at **any** dt; otherwise
+  dt ≤ **100 µs** → dt-scaled PIO (`GP`), above it software (`GC`) — a
+  bench-measured crossover: below the threshold the PIO's
+  hardware-perfect edges win despite the dt/10 tick quantization, above it
+  the software engine's one-cycle resolution wins. The fixed generator
+  dominates both whenever its fixed reset is acceptable: zero jitter,
+  one-cycle resolution, reset/settle independent of dt, zero CPU load.
+- **Fixed path** (`_fixed_sm_raw_counts`: `dt_cycles = max(9, ⌊dt·150⌋)`;
+  `half = max(1, ⌈(dt_cycles − 7)/2⌉)` — round UP, the grid is odd-only
+  so the applied dt is never faster than requested; `dt_eff =
+  (2·half + 7)/150 MHz` — the same 6.67 ns grid as the software path;
+  `intervals = ⌊int_cycles/dt_eff_cycles⌋` with the markers clamp
+  (against the requested cycle count); actual
+  reset = the fixed 5 µs; settle = 2 µs; **period = 5 + 2 +
+  (intervals+1)·dt_eff µs**).
+- **dt-scaled PIO path** (`div = 150e6 · dt / 1e7`, rounded UP to the next
+  1/256 step plus one more when the request lands exactly on a step — the
+  applied dt is strictly greater than requested, never faster: exactly
+  1.000 µs is exactly 1 MS/s and sits at the acquisition card's spec
+  limit; one step = 0.26 ns → 999.74 kS/s; `dt_eff = div_actual · 10 µs/…`; `intervals =
   ⌊int_cycles·1e6/(clk·dt)⌋`; `reset_pio = ⌊reset_cycles·1e6/(clk·dt)⌋`;
   actual int = first-to-last edge = `intervals · dt_eff`; actual reset =
   RESET-LOW = `reset_pio · dt_eff/10`; settle = 20 PIO cycles = 2·dt_eff;
   **period = reset + settle + (intervals+1)·dt_eff**).
 - **Software path** (`dt_cycles = max(1, ⌊dt·150⌋)`; `intervals =
   ⌊int_cycles/dt_cycles⌋`; actual int = `intervals · dt_eff`; actual reset =
-  reset floored to cycles; settle = 2 µs; same period formula).
+  reset floored to cycles; settle = 2 µs; **period = reset + 2 +
+  intervals·dt + min(dt/2, 1 µs)** — the 2.4 short last pulse; the PIO
+  paths keep `reset + settle + N·dt`).
+- **Transient path** (`_transient_raw_counts`, explicit UI option — never
+  auto-selected): dt pinned by the integer divider `TRANSIENT_DIV` = 16
+  (1.0667 µs at 150 MHz — nominal "1 µs"; zero jitter; 937.5 kS/s, below
+  the acquisition card's 1 MS/s spec — divider 15 would sit exactly at
+  it with zero margin); the reset rounds UP to whole ~107 ns ticks
+  (never shorter than requested); settle = one tick; **period =
+  reset + tick + N·dt µs**. Programmed via `GT` + `A reset_ticks,pulses`,
+  verified exactly like the other raw paths (gen `tpio`, pulses
+  included). The reset may go down to 1 µs — below the validated
+  measurement minimum: the study mode. The applied dt is shown in the
+  timing window's TRUE RAMP Δt tile.
 - **Rejections** (`ValueError` with the reason, surfaced by the timing
   preview): `int < dt` (the minimum integration is one interval = 2 pulses)
   and dt outside the 1 µs … 10 s range (§2.2).
 
 `configure_ramp` programs exactly the mirror's values: `XR` (mode), the
-generator selection, then — PIO — the raw counts via
-`O div_int,div_frac8,reset_pio,intervals+1` (no firmware-side rounding can
-drift from the preview), or — software — plain microseconds via `T` + `P`.
-Afterwards it queries **`Q` once** and compares `gen`, `int`, `reset`, `dt`
-against the mirror (± 0.01 µs): a mismatch is a hard configure failure
-(logged with both sides). The UI never queries the device — the preview
-values *are* the mirror.
+generator selection, then — fixed — the raw counts via
+`F half,intervals+1`, — dt-scaled PIO — the raw counts via
+`O div_int,div_frac8,reset_pio,intervals+1` (in both cases no
+firmware-side rounding can drift from the preview), or — software — plain
+microseconds via `T` + `P`. Afterwards it queries **`Q` once** and
+compares `gen`, `int`, `reset`, `dt` against the mirror (± 0.01 µs, plus
+the exact pulse count on the `O`/`F` paths): a mismatch is a hard
+configure failure (logged with both sides). The UI never queries the
+device — the preview values *are* the mirror.
 
 ### 2.6 Acquisition: the reader thread
 
@@ -377,14 +510,16 @@ the run through `start_timing()` instead of `start_measurement()`:
 ### 2.8 End-to-end sequence for an all-Pico measurement
 
 ```
-connect()                 V → "V PICO2DAQ 2.1 <id> 150"        (liveness gate)
+connect()                 V → "V PICO2DAQ 2.5 <id> 150"        (liveness gate)
 set_mode(True)            –           (no-op: always start/stop)
 set_channels(True/False)  –           (no-op: single ADC)
 set_gpio_mask([...])      C b0b1b2 → D                          (gain)
 set_input_range(0, 3.3)   –           (native range accepted)
 configure_timing(...)     XN + T int,reset  (internal mode)
-                          XR + GP + O …     (ramp mode, dt ≤ 100 µs)
-                          XR + GC + T + P   (ramp/markers, dt > 100 µs)
+                          XR + GF + F …     (ramp/markers, reset = 5 µs)
+                          XR + GP + O …     (ramp, dt ≤ 100 µs, other reset)
+                          XR + GC + T + P   (ramp/markers, dt > 100 µs, other reset)
+                          XR + GT + A …     (transient test: dt pinned 1.0667 µs, reset from 1 µs)
                           + one-time Q verification in ramp modes
 arm()                     –           (no-op: idle state = reset)
 start_measurement(...)    S → D, then the uint32 word stream

@@ -60,6 +60,45 @@ class ITimingController(ABC):
         """Indicates if this timing controller can generate ramp sampling triggers."""
         pass
 
+    @property
+    def transient_test_supported(self) -> bool:
+        """Whether this controller provides the transient-test timing: a
+        study mode with dt pinned by the firmware, the reset sweepable
+        BELOW the validated measurement minimum and a minimal settle
+        before the first conversion edge.  False on drivers without the
+        mode (the UI hides the test option)."""
+        return False
+
+    def calculate_transient_timing(
+        self, int_time_us: float, reset_time_us: float
+    ) -> ActualTiming:
+        """Exact mirror of the transient-test timing (pure computation).
+        Raises NotImplementedError on drivers without the mode."""
+        raise NotImplementedError("transient test not supported by this controller")
+
+    def configure_transient_test(
+        self, int_time_us: float, reset_time_us: float
+    ) -> bool:
+        """Configure the transient-test timing.  Raises NotImplementedError
+        on drivers without the mode."""
+        raise NotImplementedError("transient test not supported by this controller")
+
+    def calculate_transient_reset_timing(
+        self, int_time_us: float, reset_time_us: float
+    ) -> ActualTiming:
+        """Exact mirror of the reset-sampling transient timing (pure
+        computation; the app's int/reset fields are swapped in this
+        mode).  Raises NotImplementedError on drivers without the mode."""
+        raise NotImplementedError("transient test not supported by this controller")
+
+    def configure_transient_reset_test(
+        self, int_time_us: float, reset_time_us: float
+    ) -> bool:
+        """Configure the reset-sampling transient timing (pulses during
+        the reset phase).  Raises NotImplementedError on drivers without
+        the mode."""
+        raise NotImplementedError("transient test not supported by this controller")
+
     @abstractmethod
     def arm(self) -> bool:
         """

@@ -21,6 +21,7 @@ class SessionModel(QObject):
     file_path_changed = pyqtSignal(str)
     workspace_changed = pyqtSignal(str)  # emits (active_workspace_dir)
     adc_bits_changed = pyqtSignal(int)  # emits (adc_bits) — histogram geometry changes
+    adc_input_range_changed = pyqtSignal(float, float)  # emits (min, max) V — volt/charge scaling changes
 
     def __init__(self):
         super().__init__()
@@ -70,6 +71,13 @@ class SessionModel(QObject):
         # settings at load time; DEFAULT_ADC_BITS for simulation/legacy.
         # Drives histogram bins and the overflow sentinel app-wide.
         self._adc_bits = DEFAULT_ADC_BITS
+        # The ADC input range APPLIED on the acquisition device (B23):
+        # (min_volts, max_volts) from HardwareManager.get_adc_settings() at
+        # Apply Configuration and from hardware_settings.adc.input_range_volts
+        # when an archive is loaded; None = unknown (simulation / legacy
+        # archives) — the running window then keeps its editable default.
+        # Drives the counts→volt/charge scaling.
+        self._adc_input_range = None
 
         # --- Workspace & Shift Setup Properties (Optional) ---
         from core.constants import APP_VERSION
@@ -128,6 +136,22 @@ class SessionModel(QObject):
             self.adc_bits_changed.emit(value)
 
     @property
+    def adc_input_range(self):
+        """(min_volts, max_volts) of the applied ADC input range, or None
+        when unknown (see the initializer note) — the running window's
+        volt/charge scaling follows it (B23)."""
+        return self._adc_input_range
+
+    @adc_input_range.setter
+    def adc_input_range(self, value):
+        if value is not None:
+            value = (float(value[0]), float(value[1]))
+        if value != self._adc_input_range:
+            self._adc_input_range = value
+            if value is not None:
+                self.adc_input_range_changed.emit(*value)
+
+    @property
     def increased_gain(self):
         return self._increased_gain
 
@@ -168,6 +192,25 @@ class SessionModel(QObject):
     @period_s.setter
     def period_s(self, value):
         self._period_s = value
+
+    @property
+    def sample_period_s(self) -> float:
+        """Seconds between consecutive measurement samples as the hardware
+        actually ran: 1 / the applied sample frequency — the timing
+        driver's period, which includes every dead time the driver knows
+        (settle, generator overhead) and is the same basis as the archived
+        data.csv timestamps — falling back to the applied period, then to
+        int + reset for legacy sessions carrying neither.
+
+        Never re-derive it as int + reset: outside internal timing the real
+        period is reset + settle + N·dt (in markers mode up to ~4x the sum,
+        PIO generator settle included), and the time chart's axis would
+        drift against the archived timestamps."""
+        if self._sample_freq and self._sample_freq > 0.0:
+            return 1.0 / self._sample_freq
+        if self._period_s and self._period_s > 0.0:
+            return self._period_s
+        return self._int_time + self._reset_time
 
     @property
     def file_path(self):

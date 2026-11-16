@@ -146,6 +146,126 @@ def find_spectral_peaks(psd: NDArray, freqs: NDArray, threshold: float) -> list:
     return peaks
 
 
+def get_cbb_indices(sz, sz_B, n_b):
+    """
+    Generates n_b sequences of sz cyclic block‑based indices.
+
+    Each sequence is built by:
+    - Dividing the range [0, sz-1] into num_blocks = (sz // sz_B) + 1 overlapping blocks.
+    - For each block, picking a random starting index.
+    - Forming a contiguous block of sz_B indices (wrapping around via modulo sz).
+    - Concatenating all blocks and truncating to exactly sz indices.
+
+    Example
+    -------
+    sz = 10, sz_B = 3, n_b = 2
+
+    Step 1: num_blocks = (10 // 3) + 1 = 3 + 1 = 4
+
+    Step 2: Random start indices (shape = (2, 4))
+        start_indices = [[0, 7, 2, 5],
+                         [1, 4, 8, 3]]
+
+    Step 3: offsets = [0, 1, 2]
+
+    Step 4: Add offsets (broadcasting) -> blocks of 3 consecutive indices
+        For first sequence (row 0):
+            Block 0 (start 0): [0,1,2]
+            Block 1 (start 7): [7,8,9]
+            Block 2 (start 2): [2,3,4]
+            Block 3 (start 5): [5,6,7]
+        For second sequence (row 1):
+            Block 0 (start 1): [1,2,3]
+            Block 1 (start 4): [4,5,6]
+            Block 2 (start 8): [8,9,10]
+            Block 3 (start 3): [3,4,5]
+
+    Step 5: Apply modulo sz = 10
+        Only block 2 of second sequence changes: 10 % 10 = 0 → becomes [8,9,0]
+        All other indices already in [0,9].
+
+        After modulo, raw concatenated blocks (shape = (2, 4*3) = (2,12)):
+            Row0: [0,1,2, 7,8,9, 2,3,4, 5,6,7]
+            Row1: [1,2,3, 4,5,6, 8,9,0, 3,4,5]
+
+    Step 6: Truncate to first sz = 10 elements ([:, :10])
+            Row0 (output): [0,1,2,7,8,9,2,3,4,5]
+            Row1 (output): [1,2,3,4,5,6,8,9,0,3]
+
+    The returned array has shape (n_b, sz) = (2,10), each row being a cyclic,
+    wrap‑around sequence of indices built from random contiguous blocks.
+    """
+    num_blocks = (sz // sz_B) + 1
+    out = np.empty((n_b, num_blocks, sz_B), dtype=np.int32)
+    start_indices = np.random.randint(0, sz, size=(n_b, num_blocks), dtype=np.int32)
+
+    # PERFORMANCE OPTIMIZATION: Instead of calculating `indices % sz` across millions of
+    # items (which triggers expensive integer division on the CPU), we generate indices and
+    # add the offsets. Because the maximum offset is < sz, the values can only ever exceed
+    # `sz` by at most `sz_B`. Therefore, instead of modulo, we can just subtract `sz` from
+    # the out-of-bounds indices using an in-place mask. Subtraction is far cheaper than modulo.
+    np.add(start_indices[:, :, None], np.arange(sz_B, dtype=np.int32), out=out)
+
+    mask = out >= sz
+    np.subtract(out, sz, out=out, where=mask)
+
+    return out.reshape(n_b, -1)[:, :sz]
+
+
+def bootstrap_mean_var_uncertainties(
+    channel: NDArray, batch_size: int = 2
+) -> tuple[float, float]:
+    """
+    Circular block bootstrap standard uncertainties of the mean and the
+    variance of one channel — the same machinery the covariance methods
+    use (optimal block length from `arch`, wrap-around blocks, batches of
+    `batch_size` resamples on a thread pool, std(ddof=1) of the resampled
+    statistics).
+
+    Returns (0, 0) when the bootstrap cannot run (NaN optimal block length
+    or any exception), mirroring the zero-on-failure convention of
+    `calculate_results`.
+    """
+    n = len(channel)
+    try:
+        n_bootstraps = max(1, int(np.ceil(n / 10.0)))
+        opt_blocks = optimal_block_length(channel)
+        b_cb_float = opt_blocks["circular"].iloc[0]
+        if np.isnan(b_cb_float):
+            return 0.0, 0.0
+        optimal_B = max(1, min(int(np.round(b_cb_float)), n // 2))
+
+        mean_bootstraps = np.zeros(n_bootstraps)
+        var_bootstraps = np.zeros(n_bootstraps)
+
+        def process_batch(i):
+            current_batch_size = min(batch_size, n_bootstraps - i)
+            indices = get_cbb_indices(n, optimal_B, current_batch_size)
+            batch_matrix = channel[indices]
+            mb = np.mean(batch_matrix, axis=1, keepdims=True)
+            centered = batch_matrix - mb
+            var_res = np.einsum("ij,ij->i", centered, centered) / (
+                batch_matrix.shape[1] - 1
+            )
+            return i, current_batch_size, mb.squeeze(), var_res
+
+        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+            futures = [
+                executor.submit(process_batch, i)
+                for i in range(0, n_bootstraps, batch_size)
+            ]
+            for future in futures:
+                i, current_batch_size, mean_res, var_res = future.result()
+                mean_bootstraps[i : i + current_batch_size] = mean_res
+                var_bootstraps[i : i + current_batch_size] = var_res
+
+        return float(np.std(mean_bootstraps, ddof=1)), float(
+            np.std(var_bootstraps, ddof=1)
+        )
+    except Exception:
+        return 0.0, 0.0
+
+
 def calculate_fft_block(
     channel: NDArray,
     sample_freq_hz: float,
@@ -154,6 +274,7 @@ def calculate_fft_block(
     method: str = "periodogram",
     window: str = "rect",
     nperseg: int = 8192,
+    calc_bootstrap: bool = True,
 ) -> tuple[dict, dict | None]:
     """
     Frequency-domain variance–covariance estimator ("var_fft"), one channel.
@@ -165,7 +286,21 @@ def calculate_fft_block(
       rectangular window, for Welch as well since bin 0 carries the
       between-segment power);
     - Covariance: var − L·f_Nyquist (total non-white variance);
-    - y_bar_d = L·f_Nyquist / mean.
+    - y_bar_d = L·f_Nyquist / mean;
+    - cov_var_ratio = Covariance / Variance (the non-white fraction).
+
+    Uncertainties:
+    - Mean and Variance: circular block bootstrap, the same machinery as the
+      other estimators (`bootstrap_mean_var_uncertainties`; ddof=1 variance,
+      gated by `calc_bootstrap`).
+    - y_bar_d: chi-square statistics of the floor — the one-sided PSD sums
+      only the positive-frequency half and each kept bin is a two-dof
+      (χ²₂) estimate, so the mean over M kept bins has relative standard
+      uncertainty sqrt(1/M) and σ_y = y·sqrt(1/M) (first approximation:
+      ignores the threshold clipping and, for Welch, the extra degrees of
+      freedom of the segment averaging). With nothing excluded M = N/2 and
+      this reduces to the variance method's sqrt(2/N).
+    - Covariance and cov_var_ratio: unknown → 0.
 
     NaN samples are dropped, never interpolated. Frequencies outside the kept
     bands are excluded ONLY from the floor estimate.
@@ -187,11 +322,18 @@ def calculate_fft_block(
         Taper applied before the FFT.
     nperseg : int
         Segment length of the Welch estimator.
+    calc_bootstrap : bool, default=True
+        Whether to run the circular block bootstrap for the Mean and
+        Variance uncertainties (the sqrt(1/M) y_bar_d uncertainty is
+        analytical and always computed).
 
     Returns
     -------
     (stats, diagnostics) : tuple
-        `stats` holds the scalars {N, Mean, Variance, Covariance, y_bar_d}
+        `stats` holds the scalars {N, Mean, Variance, Covariance, y_bar_d,
+        cov_var_ratio} plus their uncertainties {Mean_unc, Variance_unc,
+        Covariance_unc, y_bar_d_unc, cov_var_ratio_unc}, the sample count
+        {N} and the kept floor bin count {M}
         (all 0 when the block is not computable: too few samples, no kept
         frequency bin, or invalid sample frequency). `diagnostics` is None in
         that case, otherwise a dict with `freqs`, `psd` (linear), `df`,
@@ -199,7 +341,20 @@ def calculate_fft_block(
         and `peaks` (the contiguous above-threshold ranges, empty when no
         threshold is set).
     """
-    stats = {"N": 0, "Mean": 0.0, "Variance": 0.0, "Covariance": 0.0, "y_bar_d": 0.0}
+    stats = {
+        "N": 0,
+        "M": 0,
+        "Mean": 0.0,
+        "Variance": 0.0,
+        "Covariance": 0.0,
+        "y_bar_d": 0.0,
+        "Mean_unc": 0.0,
+        "Variance_unc": 0.0,
+        "Covariance_unc": 0.0,
+        "y_bar_d_unc": 0.0,
+        "cov_var_ratio": 0.0,
+        "cov_var_ratio_unc": 0.0,
+    }
     if sample_freq_hz is None or sample_freq_hz <= 0:
         return stats, None
 
@@ -239,9 +394,39 @@ def calculate_fft_block(
     white = floor_level * (sample_freq_hz / 2.0)
     cov = var_psd - white
     yd = white / mean_ch if mean_ch > 0 else 0.0
+    cov_var_ratio = cov / var_psd if var_psd != 0 else 0.0
+
+    # --- UNCERTAINTY CALCULATION ---
+    unc_mean = unc_var = 0.0
+    if calc_bootstrap:
+        unc_mean, unc_var = bootstrap_mean_var_uncertainties(channel)
+    # chi-square statistics of the floor estimate: the one-sided PSD sums
+    # only the positive-frequency half (each kept bin is a χ²₂ estimate), so
+    # the mean over M kept bins has relative standard uncertainty sqrt(1/M)
+    # (first approximation — threshold clipping and Welch's segment
+    # averaging are ignored; with no exclusions M = N/2 -> sqrt(2/N), the
+    # variance-method result)
+    m_bins = int(np.count_nonzero(band))
+    unc_yd = float(yd * np.sqrt(1.0 / m_bins))
+    # the covariance uncertainty is not known: reported as zero (the same
+    # holds for the cov/var ratio, whose denominator's uncertainty would be
+    # needed on the frequency-domain side)
+    unc_cov = 0.0
+    unc_cov_var_ratio = 0.0
 
     stats.update(
-        N=n_ch, Mean=mean_ch, Variance=var_psd, Covariance=cov, y_bar_d=yd
+        N=n_ch,
+        M=m_bins,
+        Mean=mean_ch,
+        Variance=var_psd,
+        Covariance=cov,
+        y_bar_d=yd,
+        Mean_unc=unc_mean,
+        Variance_unc=unc_var,
+        Covariance_unc=unc_cov,
+        y_bar_d_unc=unc_yd,
+        cov_var_ratio=cov_var_ratio,
+        cov_var_ratio_unc=unc_cov_var_ratio,
     )
     diagnostics = {
         "freqs": freqs,
@@ -308,8 +493,13 @@ def calculate_results(
         DC bin carries the between-segment power); the covariance is
         var − L·f_Nyquist, i.e. everything above the white floor (peaks,
         coloured excess and slow drift alike); and y_bar_d = L·f_Nyquist /
-        mean. Uncertainties are not implemented for this method (0). Requires
-        sample_freq_hz; if it is missing the section is returned zeroed.
+        mean. Uncertainties: Mean and Variance via the circular block
+        bootstrap (same machinery as the other estimators), y_bar_d =
+        y_bar_d·sqrt(1/M) with M the number of kept frequency bins of the
+        floor (first approximation), Covariance unknown → 0. The section
+        also carries M (the kept bin count, per channel) alongside N.
+        Requires sample_freq_hz; if it is missing the section is returned
+        zeroed.
     sample_freq_hz : float, optional
         Sampling frequency in Hz (only used by the FFT method).
     fft_bands : list of (f_min, f_max), optional
@@ -353,12 +543,23 @@ def calculate_results(
             index 1: uncertainty of that value (standard deviation)
             index 2: value for channel 2 (second channel)
             index 3: uncertainty of that value
+        The covariance methods additionally carry the dimensionless ratios
+        "cov_mean_sq" (cov/mean²) and "cov_var_ratio" (cov/var) — under
+        "var_autocov" they are named "autocov_mean_sq" and
+        "autocov_var_ratio" (γ(1)/mean², γ(1)/var) — with block-bootstrap
+        uncertainties.
         For "var_cov", the "Covariance" list stores [cov_12, unc_cov, cov_12, unc_cov].
         For "var_autocov", the "AutoCorrelation" list stores [γ(1), unc_γ, γ(1), unc_γ],
         where γ(1) is the lag‑1 autocovariance of the channel.
-        "var_fft" (computed only when calc_fft=True) has the same layout as "var_cov";
-        its "Covariance" is the total non‑white variance above the white floor and its
-        uncertainty slots are always 0 (not implemented yet).
+        "var_fft" (computed only when calc_fft=True) has the same layout as "var_cov"
+        plus "cov_var_ratio" = Covariance/Variance (the non-white fraction) and
+        "M" = the number of frequency bins kept for the floor (per channel, next
+        to "N" the sample count); its "Covariance" is the total non-white
+        variance above the white floor. Its uncertainty slots (odd indices):
+        Mean and Variance carry bootstrap standard deviations, y_bar_d carries
+        y_bar_d·sqrt(1/M) with M the number of frequency bins kept for the
+        floor estimate, and the Covariance and cov_var_ratio uncertainties
+        are unknown and reported as 0.
 
     Notes
     -----
@@ -386,6 +587,10 @@ def calculate_results(
             result_dict[key]["Variance"][ii_idx + 1] = 0
             result_dict[key]["y_bar_d"][ii_idx + 1] = 0
 
+            if "M" in result_dict[key]:
+                result_dict[key]["M"][ii_idx] = 0
+                result_dict[key]["M"][ii_idx + 1] = 0
+
             if "Covariance" in result_dict[key]:
                 result_dict[key]["Covariance"][ii_idx] = 0
                 result_dict[key]["Covariance"][ii_idx + 1] = 0
@@ -394,6 +599,10 @@ def calculate_results(
                 result_dict[key]["cov_mean_sq"][ii_idx] = 0
                 result_dict[key]["cov_mean_sq"][ii_idx + 1] = 0
 
+            if "cov_var_ratio" in result_dict[key]:
+                result_dict[key]["cov_var_ratio"][ii_idx] = 0
+                result_dict[key]["cov_var_ratio"][ii_idx + 1] = 0
+
             if "AutoCorrelation" in result_dict[key]:
                 result_dict[key]["AutoCorrelation"][ii_idx] = 0
                 result_dict[key]["AutoCorrelation"][ii_idx + 1] = 0
@@ -401,6 +610,10 @@ def calculate_results(
             if "autocov_mean_sq" in result_dict[key]:
                 result_dict[key]["autocov_mean_sq"][ii_idx] = 0
                 result_dict[key]["autocov_mean_sq"][ii_idx + 1] = 0
+
+            if "autocov_var_ratio" in result_dict[key]:
+                result_dict[key]["autocov_var_ratio"][ii_idx] = 0
+                result_dict[key]["autocov_var_ratio"][ii_idx + 1] = 0
 
     def get_ch_matrix(idx, both_ch_cov: bool = False):
         if both_ch_cov:
@@ -437,6 +650,7 @@ def calculate_results(
             cov = np.cov(x, y, ddof=1)[0, 1]
             yd = (var - cov) / mean if mean > 0 else 0
             cov_mean_sq = cov / (mean**2) if mean != 0 else 0
+            cov_var_ratio = cov / var if var != 0 else 0
 
             # --- UNCERTAINTY CALCULATION ---
 
@@ -507,22 +721,30 @@ def calculate_results(
                             mean_bootstraps**2 + 1e-15
                         )
 
+                        cov_var_ratio_bootstraps = cov_bootstraps / (
+                            var_bootstraps + 1e-15
+                        )
+
                         unc_mean = np.std(mean_bootstraps, ddof=1)
                         unc_var = np.std(var_bootstraps, ddof=1)
                         unc_cov = np.std(cov_bootstraps, ddof=1)
                         unc_yd = np.std(yD_bootstraps, ddof=1)
                         unc_cov_mean_sq = np.std(cov_mean_sq_bootstraps, ddof=1)
+                        unc_cov_var_ratio = np.std(cov_var_ratio_bootstraps, ddof=1)
                 except Exception:
                     error = True
             else:
                 unc_mean = unc_var = unc_cov = unc_yd = 0.0
                 unc_cov_mean_sq = 0.0
+                unc_cov_var_ratio = 0.0
 
         if error:
             mean = var = cov = yd = 0.0
             unc_mean = unc_var = unc_cov = unc_yd = 0.0
             cov_mean_sq = 0.0
             unc_cov_mean_sq = 0.0
+            cov_var_ratio = 0.0
+            unc_cov_var_ratio = 0.0
 
         target_key = "var_doublecov" if both_ch else "var_cov"
 
@@ -532,12 +754,14 @@ def calculate_results(
         result[target_key]["Covariance"][ii] = cov
         result[target_key]["y_bar_d"][ii] = yd
         result[target_key]["cov_mean_sq"][ii] = cov_mean_sq
+        result[target_key]["cov_var_ratio"][ii] = cov_var_ratio
 
         result[target_key]["Mean"][ii + 1] = unc_mean
         result[target_key]["Variance"][ii + 1] = unc_var
         result[target_key]["Covariance"][ii + 1] = unc_cov
         result[target_key]["y_bar_d"][ii + 1] = unc_yd
         result[target_key]["cov_mean_sq"][ii + 1] = unc_cov_mean_sq
+        result[target_key]["cov_var_ratio"][ii + 1] = unc_cov_var_ratio
 
     def calc_fft_estimator(idx: int, ii: int):
         """
@@ -553,14 +777,22 @@ def calculate_results(
             method=fft_method,
             window=fft_window,
             nperseg=fft_nperseg,
+            calc_bootstrap=calc_bootstrap,
         )
         if stats["N"] == 0:
             return
         result["var_fft"]["N"][ii] = stats["N"]
+        result["var_fft"]["M"][ii] = stats["M"]
         result["var_fft"]["Mean"][ii] = stats["Mean"]
         result["var_fft"]["Variance"][ii] = stats["Variance"]
         result["var_fft"]["Covariance"][ii] = stats["Covariance"]
         result["var_fft"]["y_bar_d"][ii] = stats["y_bar_d"]
+        result["var_fft"]["cov_var_ratio"][ii] = stats["cov_var_ratio"]
+        result["var_fft"]["Mean"][ii + 1] = stats["Mean_unc"]
+        result["var_fft"]["Variance"][ii + 1] = stats["Variance_unc"]
+        result["var_fft"]["Covariance"][ii + 1] = stats["Covariance_unc"]
+        result["var_fft"]["y_bar_d"][ii + 1] = stats["y_bar_d_unc"]
+        result["var_fft"]["cov_var_ratio"][ii + 1] = stats["cov_var_ratio_unc"]
 
     def batch_lagged_auto_cov(batch_matrix, t, ddof=1):
         """
@@ -599,71 +831,6 @@ def calculate_results(
         denom = n - ddof
         return sum_prod / denom
 
-    def get_cbb_indices(sz, sz_B, n_b):
-        """
-        Generates n_b sequences of sz cyclic block‑based indices.
-
-        Each sequence is built by:
-        - Dividing the range [0, sz-1] into num_blocks = (sz // sz_B) + 1 overlapping blocks.
-        - For each block, picking a random starting index.
-        - Forming a contiguous block of sz_B indices (wrapping around via modulo sz).
-        - Concatenating all blocks and truncating to exactly sz indices.
-
-        Example
-        -------
-        sz = 10, sz_B = 3, n_b = 2
-
-        Step 1: num_blocks = (10 // 3) + 1 = 3 + 1 = 4
-
-        Step 2: Random start indices (shape = (2, 4))
-            start_indices = [[0, 7, 2, 5],
-                             [1, 4, 8, 3]]
-
-        Step 3: offsets = [0, 1, 2]
-
-        Step 4: Add offsets (broadcasting) -> blocks of 3 consecutive indices
-            For first sequence (row 0):
-                Block 0 (start 0): [0,1,2]
-                Block 1 (start 7): [7,8,9]
-                Block 2 (start 2): [2,3,4]
-                Block 3 (start 5): [5,6,7]
-            For second sequence (row 1):
-                Block 0 (start 1): [1,2,3]
-                Block 1 (start 4): [4,5,6]
-                Block 2 (start 8): [8,9,10]
-                Block 3 (start 3): [3,4,5]
-
-        Step 5: Apply modulo sz = 10
-            Only block 2 of second sequence changes: 10 % 10 = 0 → becomes [8,9,0]
-            All other indices already in [0,9].
-
-            After modulo, raw concatenated blocks (shape = (2, 4*3) = (2,12)):
-                Row0: [0,1,2, 7,8,9, 2,3,4, 5,6,7]
-                Row1: [1,2,3, 4,5,6, 8,9,0, 3,4,5]
-
-        Step 6: Truncate to first sz = 10 elements ([:, :10])
-                Row0 (output): [0,1,2,7,8,9,2,3,4,5]
-                Row1 (output): [1,2,3,4,5,6,8,9,0,3]
-
-        The returned array has shape (n_b, sz) = (2,10), each row being a cyclic,
-        wrap‑around sequence of indices built from random contiguous blocks.
-        """
-        num_blocks = (sz // sz_B) + 1
-        out = np.empty((n_b, num_blocks, sz_B), dtype=np.int32)
-        start_indices = np.random.randint(0, sz, size=(n_b, num_blocks), dtype=np.int32)
-
-        # PERFORMANCE OPTIMIZATION: Instead of calculating `indices % sz` across millions of
-        # items (which triggers expensive integer division on the CPU), we generate indices and
-        # add the offsets. Because the maximum offset is < sz, the values can only ever exceed
-        # `sz` by at most `sz_B`. Therefore, instead of modulo, we can just subtract `sz` from
-        # the out-of-bounds indices using an in-place mask. Subtraction is far cheaper than modulo.
-        np.add(start_indices[:, :, None], np.arange(sz_B, dtype=np.int32), out=out)
-
-        mask = out >= sz
-        np.subtract(out, sz, out=out, where=mask)
-
-        return out.reshape(n_b, -1)[:, :sz]
-
     result = {
         "var": {
             "N": [0, 0, 0, 0],
@@ -678,6 +845,7 @@ def calculate_results(
             "Covariance": [0, 0, 0, 0],
             "y_bar_d": [0, 0, 0, 0],
             "cov_mean_sq": [0, 0, 0, 0],
+            "cov_var_ratio": [0, 0, 0, 0],
         },
         "var_autocov": {
             "N": [0, 0, 0, 0],
@@ -686,6 +854,7 @@ def calculate_results(
             "AutoCorrelation": [0, 0, 0, 0],
             "y_bar_d": [0, 0, 0, 0],
             "autocov_mean_sq": [0, 0, 0, 0],
+            "autocov_var_ratio": [0, 0, 0, 0],
         },
         "var_doublecov": {
             "N": [0, 0, 0, 0],
@@ -694,13 +863,16 @@ def calculate_results(
             "Covariance": [0, 0, 0, 0],
             "y_bar_d": [0, 0, 0, 0],
             "cov_mean_sq": [0, 0, 0, 0],
+            "cov_var_ratio": [0, 0, 0, 0],
         },
         "var_fft": {
             "N": [0, 0, 0, 0],
+            "M": [0, 0, 0, 0],
             "Mean": [0, 0, 0, 0],
             "Variance": [0, 0, 0, 0],
             "Covariance": [0, 0, 0, 0],
             "y_bar_d": [0, 0, 0, 0],
+            "cov_var_ratio": [0, 0, 0, 0],
         },
     }
 
@@ -778,6 +950,7 @@ def calculate_results(
         yd = (var - auto_cov) / safe_mean if safe_mean > 0 else 0.0
 
         autocov_mean_sq = auto_cov / (safe_mean**2) if mean != 0 else 0.0
+        autocov_var_ratio = auto_cov / var if var != 0 else 0.0
         # --- UNCERTAINTY CALCULATION ---
         if calc_bootstrap:
             try:
@@ -832,23 +1005,33 @@ def calculate_results(
                         mean_bootstraps**2 + 1e-15
                     )
 
+                    autocov_var_ratio_bootstraps = auto_cov_bootstraps / (
+                        var_bootstraps + 1e-15
+                    )
+
                     unc_mean = np.std(mean_bootstraps, ddof=1)
                     unc_var = np.std(var_bootstraps, ddof=1)
                     unc_auto_cov = np.std(auto_cov_bootstraps, ddof=1)
                     unc_yd = np.std(yD_bootstraps, ddof=1)
                     unc_autocov_mean_sq = np.std(autocov_mean_sq_bootstraps, ddof=1)
+                    unc_autocov_var_ratio = np.std(
+                        autocov_var_ratio_bootstraps, ddof=1
+                    )
 
             except Exception:
                 error = True
         else:
             unc_mean = unc_var = unc_auto_cov = unc_yd = 0.0
             unc_autocov_mean_sq = 0.0
+            unc_autocov_var_ratio = 0.0
 
         if error:
             mean = var = auto_cov = yd = 0.0
             unc_mean = unc_var = unc_auto_cov = unc_yd = 0.0
             autocov_mean_sq = 0
             unc_autocov_mean_sq = 0.0
+            autocov_var_ratio = 0.0
+            unc_autocov_var_ratio = 0.0
 
         result["var_autocov"]["N"][ii] = n
         result["var_autocov"]["Mean"][ii] = mean
@@ -856,12 +1039,14 @@ def calculate_results(
         result["var_autocov"]["AutoCorrelation"][ii] = auto_cov
         result["var_autocov"]["y_bar_d"][ii] = yd
         result["var_autocov"]["autocov_mean_sq"][ii] = autocov_mean_sq
+        result["var_autocov"]["autocov_var_ratio"][ii] = autocov_var_ratio
 
         result["var_autocov"]["Mean"][ii + 1] = unc_mean
         result["var_autocov"]["Variance"][ii + 1] = unc_var
         result["var_autocov"]["AutoCorrelation"][ii + 1] = unc_auto_cov
         result["var_autocov"]["y_bar_d"][ii + 1] = unc_yd
         result["var_autocov"]["autocov_mean_sq"][ii + 1] = unc_autocov_mean_sq
+        result["var_autocov"]["autocov_var_ratio"][ii + 1] = unc_autocov_var_ratio
 
         # ==============================
         # --- FFT VARIANCE-COVARIANCE ---

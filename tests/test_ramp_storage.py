@@ -429,11 +429,11 @@ def test_publish_moves_files_with_collision_suffix(tmp_path):
 def test_unique_ramp_folder(tmp_path):
     root = str(tmp_path)
     first = unique_ramp_folder(root, "m")
-    assert first.endswith("/m")
+    assert os.path.basename(first) == "m"
     os.makedirs(first)
-    assert unique_ramp_folder(root, "m").endswith("/m_1")
+    assert os.path.basename(unique_ramp_folder(root, "m")) == "m_1"
     os.makedirs(os.path.join(root, "m_1"))
-    assert unique_ramp_folder(root, "m").endswith("/m_2")
+    assert os.path.basename(unique_ramp_folder(root, "m")) == "m_2"
 
 
 def test_recover_trims_to_whole_windows_at_watermark(tmp_path):

@@ -226,3 +226,59 @@ def test_session_refresh_helper_maps_the_geometry():
     assert session.timing_mode == "internal"
     assert session.samples_per_window == 0
     assert session.ramp_dt_s == 0.0
+
+
+def test_transient_test_mode_threads_the_mirror_geometry(app_controller):
+    """The test-mode checkbox (dt pinned by the firmware's divider, nominal
+    1 us / applied 1.0667 us, reset from 1 us) routes
+    the preview through the driver's transient mirror: the session
+    carries the applied geometry exactly like a normal ramp run, and a
+    sub-envelope reset (3 us, below the validated 5 us minimum) is
+    accepted."""
+    from hardware.pico.pico_daq import PicoSerialDAQ
+
+    tw = _wizard(app_controller)
+    _show_wizard(tw)
+    tw.sample_ramp_cb.setChecked(True)
+    tw.ramp_dt_input.setText("1")
+    tw.magnitude_int.setCurrentIndex(2)   # us
+    tw.magnitude_rst.setCurrentIndex(2)   # us
+    # 100.5 us, not a whole 100: the wizard's us -> s -> us round trip
+    # (100 * 1e-6 * 1e6) lands one cycle below an exact boundary value —
+    # a pre-existing edge on every generator, irrelevant half a cycle in.
+    tw.int_time.setText("100.5")
+    tw.rst_time.setText("3")              # below the 5 us envelope floor
+    tw.transient_test_cb.setChecked(True)  # forces the ramp path, dt = 1
+    tw.on_manual_edit()
+
+    session = app_controller.session_model
+    mirror = PicoSerialDAQ().calculate_transient_timing(100.5, 3.0)
+    assert session.timing_mode == "ramp"
+    assert session.int_time == pytest.approx(mirror.int_time_us / 1e6)
+    assert session.reset_time == pytest.approx(mirror.reset_time_us / 1e6)
+    assert session.samples_per_window == mirror.samples_per_window
+    assert session.ramp_dt_s == pytest.approx(mirror.ramp_dt_eff_us / 1e6)
+
+
+def test_reset_sampling_mode_threads_the_swapped_geometry(app_controller):
+    """The 'Sample During Reset' checkbox swaps the field meanings:
+    Integration Time drives the pulsed reset phase (3 samples over
+    3 * 1.0667 us), Reset Time the silent integration (20 ms); the session
+    carries the swapped mirror geometry verbatim."""
+    from hardware.pico.pico_daq import PicoSerialDAQ
+
+    tw = _wizard(app_controller)
+    _show_wizard(tw)
+    tw.magnitude_int.setCurrentIndex(2)   # us
+    tw.magnitude_rst.setCurrentIndex(2)   # us
+    tw.int_time.setText("3")              # pulsed (sampled) reset phase
+    tw.rst_time.setText("20000")          # silent integration phase
+    tw.transient_reset_cb.setChecked(True)
+    tw.on_manual_edit()
+
+    session = app_controller.session_model
+    mirror = PicoSerialDAQ().calculate_transient_reset_timing(3.0, 20000.0)
+    assert session.timing_mode == "ramp"
+    assert session.int_time == pytest.approx(mirror.int_time_us / 1e6)
+    assert session.reset_time == pytest.approx(mirror.reset_time_us / 1e6)
+    assert session.samples_per_window == mirror.samples_per_window == 3

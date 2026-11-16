@@ -125,12 +125,13 @@ class HardwareManager:
         self.gain_ch2 = self.devices.get(config.roles.gain_ch2)
 
         # Instrument-style acquisition drivers map the config's channels
-        # (with their termination) onto fixed input terminals; µC drivers
-        # no-op (firmware with fixed inputs).  Missing termination defaults
-        # to differential.
+        # (with their termination and optional adc_input terminal
+        # override) onto the device's input terminals; µC drivers no-op
+        # (firmware with fixed inputs).  Missing termination defaults to
+        # differential.
         if self.acquisition is not None and hasattr(self.acquisition, "configure_channels"):
             channel_plan = [
-                (ch_id, ch.termination or "differential")
+                (ch_id, ch.termination or "differential", ch.adc_input)
                 for ch_id, ch in config.channels.items()
             ]
             try:
@@ -210,6 +211,15 @@ class HardwareManager:
                 if registered is not None:
                     return registered.descriptor.acq_max_rate_hz
         return None
+
+    @property
+    def transient_test_supported(self) -> bool:
+        """Whether the assigned timing device provides the transient-test
+        timing (a study mode: dt pinned, reset sweepable below the
+        validated minimum, minimal settle).  Drives the UI option."""
+        if self.timing is None:
+            return False
+        return bool(getattr(self.timing, "transient_test_supported", False))
 
     @property
     def can_ramp_while_acquiring(self) -> bool:
@@ -500,6 +510,8 @@ class HardwareManager:
         ramp_dt_us: Optional[float],
         int_time_us: float,
         reset_time_us: float,
+        transient_test: bool = False,
+        transient_reset: bool = False,
     ) -> None:
         """Pure realizability check of a timing configuration through the
         driver's exact mirror (no serial traffic).  Raises ValueError with
@@ -507,6 +519,14 @@ class HardwareManager:
         with T_int beyond the ramp-dt range).  No-op without a timing
         controller or a driver without a mirror (the PIC)."""
         if self.timing is None:
+            return
+        if transient_reset:
+            # Reset-sampling study mode: the app's fields are swapped
+            # (int field = pulsed reset phase, reset field = silent phase).
+            self.timing.calculate_transient_reset_timing(int_time_us, reset_time_us)
+            return
+        if transient_test:
+            self.timing.calculate_transient_timing(int_time_us, reset_time_us)
             return
         mode = self.timing_mode_for(sample_ramp)
         if mode not in ("ramp", "markers"):
@@ -526,6 +546,8 @@ class HardwareManager:
         int_time_us: float,
         reset_time_us: float,
         period_us: Optional[float] = None,
+        transient_test: bool = False,
+        transient_reset: bool = False,
     ) -> bool:
         """Configure the timing device for a measurement, routed by
         timing_mode_for(): ramp sampling as requested, window markers
@@ -540,7 +562,13 @@ class HardwareManager:
             return False
         # Validate through the driver's mirror BEFORE touching hardware:
         # an unrepresentable request raises with the reason.
-        self.validate_timing(sample_ramp, ramp_dt_us, int_time_us, reset_time_us)
+        self.validate_timing(sample_ramp, ramp_dt_us, int_time_us, reset_time_us,
+                             transient_test, transient_reset)
+        if transient_reset:
+            return self.timing.configure_transient_reset_test(int_time_us,
+                                                              reset_time_us)
+        if transient_test:
+            return self.timing.configure_transient_test(int_time_us, reset_time_us)
         mode = self.timing_mode_for(sample_ramp)
         if mode == "ramp":
             return self.timing.configure_ramp(ramp_dt_us, int_time_us, reset_time_us, period_us)
@@ -556,6 +584,8 @@ class HardwareManager:
         int_time_us: float,
         reset_time_us: float,
         period_us: Optional[float] = None,
+        transient_test: bool = False,
+        transient_reset: bool = False,
     ) -> tuple:
         """True-values preview routed like configure_timing(); returns
         (ActualTiming | None, mode).  The marker/ramp previews come from
@@ -566,6 +596,19 @@ class HardwareManager:
         re-raised — the caller must surface it.  Falling back to the
         no-ramp numbers here would show values that can never be applied,
         with only a generic failure at Apply time."""
+        if transient_reset:
+            # The reset-sampling study mode: pulses DURING the reset
+            # phase (app fields swapped); downstream it behaves like ramp
+            # sampling (window geometry from the mirror verbatim).
+            return self.timing.calculate_transient_reset_timing(
+                int_time_us, reset_time_us), "ramp"
+        if transient_test:
+            # The study mode: dt pinned by the firmware, reset sweepable
+            # below the validated minimum — downstream it behaves like
+            # ramp sampling (window geometry from the mirror verbatim).
+            return self.timing.calculate_transient_timing(int_time_us,
+                                                          reset_time_us), "ramp"
+
         mode = self.timing_mode_for(sample_ramp)
 
         def ramp_preview(dt_us):

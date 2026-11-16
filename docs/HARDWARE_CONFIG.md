@@ -73,7 +73,7 @@ connection) accepts an optional free-text `"note"`.
 | `name` | Human-readable name, shown in the app and written into the archives. |
 | `driver` | Stable code selecting the communication implementation (`pico_serial_v1`, `pic_serial_v1`, `dummy_v1`). Must be known to the app. |
 | `firmware_version` | Optional, informational; recorded in the archives. |
-| `connection` | Transport: `type: "serial"` with `baud_rate`, `type: "daqmx"` with `device` (the DAQmx device name of the NI card, e.g. `NI6451`), or `type: "dummy"` for the virtual acquisition device. **No port**: the file stays machine-independent — the serial persistent name is derived from the device id (`/dev/atomiqa/<id>`, §5.1), the NI card is identified by its name in the DAQmx driver stack. A leftover `port` field from an older file is ignored with a warning. |
+| `connection` | Transport: `type: "serial"` with `baud_rate`, `type: "daqmx"` with `device` (the DAQmx device name of the NI card, e.g. `Dev1` — the default on a fresh NI-DAQmx install), or `type: "dummy"` for the virtual acquisition device. **No port**: the file stays machine-independent — the serial persistent name is derived from the device id (`/dev/atomiqa/<id>`, §5.1), the NI card is identified by its name in the DAQmx driver stack. A leftover `port` field from an older file is ignored with a warning. |
 | `capabilities` | What this device can do in this setup. Declare a block only if the device is used for it. |
 
 A device is *usable* in a role only if it declares the matching capability
@@ -185,17 +185,27 @@ is fixed by the device firmware.
 The presence of a channel is what makes it active: **a single-detector run
 simply omits `ch2`** (and its gain role, circuit and wiring). `ch2` requires
 `ch1`. Each channel binds exactly one circuit. `adc_input` is optional and
-instrument-specific (e.g. the input terminal of a NI card); with the
-microcontrollers it is unnecessary and may be omitted.
+instrument-specific: it names the **physical input of the acquisition
+device** the channel is wired to (e.g. `"AI6"` on a NI card) and overrides
+the driver's bench-default terminal for that channel — the acquisition
+driver validates it against its real inputs, so a terminal it cannot wire
+is a load error. With the microcontrollers it is unnecessary and may be
+omitted.
 
 `termination` (optional, `"differential"` or `"rse"`) tells the acquisition
 device how the channel's signal reaches it — e.g. one channel differential
 and the other single-ended is legal. The *physical input pins* behind each
-choice are fixed hardware facts hardcoded in the driver: on the NI USB-6451,
-ch1 differential = AI0(+)/AI8(−), ch2 differential = AI1(+)/AI9(−), ch1
-single-ended = AI2, ch2 single-ended = AI3 (four different ADCs, so every
-mix samples simultaneously at 1 MS/s per channel). When omitted, the
-acquisition driver's default (`differential`) applies.
+choice default to fixed hardware facts in the driver; on the NI USB-6451:
+ch1 differential = AI7(+)/AI15(−), ch2 differential = AI1(+)/AI9(−), ch1
+single-ended = AI0, ch2 single-ended = AI3 (every terminal carries its own
+ADC, so every mix samples simultaneously at 1 MS/s per channel). To measure
+on a different terminal, set `adc_input` — e.g. `"termination": "rse"` with
+`"adc_input": "AI6"` reads the channel referenced-single-ended on AI6 (rse:
+AI0–AI15; differential: the positive of the AI\<n\>/AI\<n+8\> pair,
+AI0–AI7). When `termination` is omitted, the acquisition driver's default
+(`differential`) applies; two channels must not resolve to the same
+terminal. With the microcontrollers (fixed firmware inputs) both fields
+are unnecessary and may be omitted.
 
 ### 2.4 `roles` — who does what
 
@@ -285,15 +295,18 @@ nothing machine-specific to fill in after insertion.
 Shipping a new component into the library = dropping a fragment file into
 the folder; conversely, the editor's **"Save as Component…"** writes the
 selected device or circuit as a new fragment (devices keep their whole
-connection block; a stale deprecated `port` field is dropped).
+connection block; a stale deprecated `port` field is dropped). A saved
+fragment imports back through the editor's **"Add from Library…"** (after
+dropping it into `hardware_library/`) or **"Add from File…"** — both the
+Devices and the Circuits tab offer them.
 
 Shipped components:
 
 | Fragment | Provides |
 |---|---|
-| `device_pico2.json` | Raspberry Pi Pico 2 (firmware **PICO2DAQ 2.1, required**) — timing (int ≥ 5 µs, reset ≥ 5 µs, dt 1 µs…10 s), gain (3 pins: GP17/18/19), acquisition (1 channel, 12 bit, 0…3.3 V). The dt range covers the software generator (markers mode with long integrations, ramp sampling with coarse dt); the PIO generator is auto-selected only up to 100 µs. |
-| `device_pic.json` | PIC — timing (no ramp sampling), gain (1 pin), acquisition (2 channels, 12 bit, 0…5 V). |
-| `device_usb6451.json` | NI USB-6451 — acquisition only (DAQmx device `NI6451`): 2 simultaneous channels, 20 bit, ±0.2/±2.5/±5/±10 V (default ±5 V), clocked by the external CONV_START from the timing device. Combine with a timing µC (e.g. the Pico fragment without its acquisition block). |
+| `device_pico2.json` | Raspberry Pi Pico 2 (firmware **PICO2DAQ 2.5, required**) — timing (int ≥ 5 µs, reset ≥ 5 µs, dt 1 µs…10 s), gain (3 pins: GP17/18/19), acquisition (1 channel, 12 bit, 0…3.3 V). Generator auto-selection: reset = 5 µs → the fixed-clock PIO generator (zero jitter, any dt, including markers mode with long integrations); otherwise dt ≤ 100 µs → the dt-scaled PIO, above → the software generator. |
+| `device_pic.json` | PIC — timing (no ramp sampling; reset ≤ 2 s: the reset phase spans a single timer period, by design), gain (1 pin), acquisition (2 channels, 12 bit, 0…5 V). |
+| `device_usb6451.json` | NI USB-6451 — acquisition only (DAQmx device `Dev1`): 2 simultaneous channels, 20 bit, ±0.2/±2.5/±5/±10 V (default ±5 V), clocked by the external CONV_START from the timing device. Combine with a timing µC (e.g. the Pico fragment without its acquisition block). |
 | `device_dummy_acquisition.json` | Virtual acquisition (`dummy_v1`): bench tests only, no data. |
 | `circuit_board_rev_b_ch1.json` | Integrator board rev. B: 22 pF fixed + 100/560/3300 pF switchable. |
 | `circuit_board_rev_b_ch2.json` | Integrator board rev. B: 100 pF switchable, no fixed. |
@@ -322,8 +335,9 @@ Workspace Settings → **Hardware Configuration**:
   (driver, timing envelope, gain pins, ADC properties, the derived persistent
   name) are shown **read-only** with their physical limits as hints;
   everything that belongs to the bench — capacitor values, wiring, roles,
-  channels, names, notes, baud rate — is editable. Changes are validated
-  live; the file can only be saved when it has no errors.
+  channels, names, notes, baud rate, the devices' `firmware_version` — is
+  editable. Changes are validated live; the file can only be saved when it
+  has no errors.
 - **New from Components…** — assembles a fresh configuration from the library.
 - **Remove Link** — unlinks the configuration (the file stays on disk);
   real-hardware features are then disabled.

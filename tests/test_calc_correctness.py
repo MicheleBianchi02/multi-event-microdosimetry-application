@@ -420,6 +420,97 @@ class TestVarDoubleCovBlock:
 # ---------------------------------------------------------------------------
 
 
+class TestCovVarRatio:
+    """cov_var_ratio = cov/var (γ(1)/var under var_autocov), with
+    block-bootstrap uncertainties; the plain variance method has none."""
+
+    def _ar1(self, seed, n=400, phi=0.6):
+        np.random.seed(seed)
+        eps = np.random.normal(0, 1.0, n)
+        x = np.zeros(n)
+        x[0] = eps[0]
+        for t in range(1, n):
+            x[t] = phi * x[t - 1] + eps[t]
+        return x + 5.0
+
+    def test_var_method_has_no_ratio_key(self):
+        np.random.seed(21)
+        data = _make_data(
+            np.random.normal(10, 2, 100), np.random.normal(5, 1, 100)
+        )
+        res = calculate_results(data, calc_bootstrap=False)
+        assert "cov_var_ratio" not in res["var"]
+        # the ratio keys stay within their own method families
+        assert "cov_var_ratio" not in res["var_autocov"]
+        assert "autocov_var_ratio" not in res["var_cov"]
+        assert "autocov_var_ratio" not in res["var_fft"]
+
+    def test_var_cov_ratio_is_cov_over_var_with_bootstrap_unc(self):
+        data = _make_data(self._ar1(22), np.random.normal(3, 0.5, 400))
+        res = calculate_results(data)
+        expected = (
+            res["var_cov"]["Covariance"][0] / res["var_cov"]["Variance"][0]
+        )
+        assert res["var_cov"]["cov_var_ratio"][0] == pytest.approx(expected)
+        # AR(1): cov(even, odd) ≈ γ(1) and var ≈ γ(0) → ratio ≈ phi
+        assert res["var_cov"]["cov_var_ratio"][0] == pytest.approx(0.6, abs=0.15)
+        assert res["var_cov"]["cov_var_ratio"][1] > 0.0
+
+    def test_var_autocov_ratio_is_gamma_over_var(self):
+        data = _make_data(self._ar1(23), np.random.normal(3, 0.5, 400))
+        res = calculate_results(data)
+        expected = (
+            res["var_autocov"]["AutoCorrelation"][0]
+            / res["var_autocov"]["Variance"][0]
+        )
+        assert res["var_autocov"]["autocov_var_ratio"][0] == pytest.approx(expected)
+        # for AR(1), γ(1)/γ(0) = phi exactly
+        assert res["var_autocov"]["autocov_var_ratio"][0] == pytest.approx(
+            0.6, abs=0.15
+        )
+        assert res["var_autocov"]["autocov_var_ratio"][1] > 0.0
+
+    def test_var_doublecov_ratio_is_cross_cov_over_own_var(self):
+        np.random.seed(24)
+        n = 300
+        common = np.random.normal(0, 1, n)
+        ch0 = common * 2 + np.random.normal(5.0, 0.5, n)
+        ch1 = common * 1.5 + np.random.normal(3.0, 0.5, n)
+        res = calculate_results(_make_data(ch0, ch1), cov_both_ch=True)
+        for slots in (0, 2):
+            ratio = res["var_doublecov"]["cov_var_ratio"][slots]
+            expected = (
+                res["var_doublecov"]["Covariance"][slots]
+                / res["var_doublecov"]["Variance"][slots]
+            )
+            assert ratio == pytest.approx(expected)
+            assert ratio > 0.0
+        # each channel slot divides by its OWN variance (Cauchy-Schwarz only
+        # bounds the cross-cov by sqrt(var_ch1·var_ch2), so the ch2 ratio
+        # of this construction legitimately exceeds 1)
+        assert res["var_doublecov"]["cov_var_ratio"][0] < 1.0
+        assert res["var_doublecov"]["cov_var_ratio"][2] > 1.0
+        assert res["var_doublecov"]["cov_var_ratio"][1] > 0.0
+
+    def test_bootstrap_disabled_ratio_unc_zero(self):
+        data = _make_data(self._ar1(25), np.random.normal(3, 0.5, 400))
+        res = calculate_results(data, calc_bootstrap=False)
+        assert res["var_cov"]["cov_var_ratio"][1] == 0.0
+        assert res["var_autocov"]["autocov_var_ratio"][1] == 0.0
+        # the values themselves are still computed
+        assert res["var_cov"]["cov_var_ratio"][0] != 0.0
+
+    def test_disabled_channel_ratio_zeroed(self):
+        np.random.seed(26)
+        data = _make_data(
+            np.random.normal(10, 2, 100), np.random.normal(5, 1, 100)
+        )
+        res = calculate_results(data, ch2=False, cov_both_ch=True)
+        assert res["var_cov"]["cov_var_ratio"][2:] == [0, 0]
+        assert res["var_doublecov"]["cov_var_ratio"] == [0, 0, 0, 0]
+        assert res["var_autocov"]["autocov_var_ratio"][2:] == [0, 0]
+
+
 class TestChannelDisabling:
     """Verify that disabled channels are fully zeroed in all sub-dicts."""
 
@@ -889,9 +980,21 @@ class TestVarFftWhiteNoise:
         res, _ = self._run()
         assert res["var_fft"]["N"][0] == N_FFT
         assert res["var_fft"]["N"][2] == N_FFT
-        for key in ("N", "Mean", "Variance", "Covariance", "y_bar_d"):
+        # M: the number of kept floor bins (full band kept -> every AC bin,
+        # Nyquist included), archived next to N with no uncertainty
+        assert res["var_fft"]["M"][0] == N_FFT // 2
+        assert res["var_fft"]["M"][2] == N_FFT // 2
+        assert res["var_fft"]["M"][1] == 0
+        assert res["var_fft"]["M"][3] == 0
+        # bootstrap disabled: mean/var/cov uncertainties stay 0 ...
+        for key in ("N", "M", "Mean", "Variance", "Covariance"):
             assert res["var_fft"][key][1] == 0
             assert res["var_fft"][key][3] == 0
+        # ... while the analytical sqrt(1/M) y_bar_d uncertainty is present
+        # (nothing excluded: M = N/2 -> sqrt(2/N), the variance-method value)
+        expected = res["var_fft"]["y_bar_d"][0] * np.sqrt(2.0 / N_FFT)
+        assert res["var_fft"]["y_bar_d"][1] == pytest.approx(expected)
+        assert res["var_fft"]["y_bar_d"][3] == pytest.approx(expected)
 
     def test_nan_samples_dropped(self):
         rng = np.random.default_rng(4)
@@ -1180,6 +1283,127 @@ class TestPerChannelThresholds:
         expected_biased = 0.018 * (1 - np.exp(-8 * 0.008 / 0.018)) * (FS / 2)
         assert white2 == pytest.approx(expected_biased, rel=0.05)
         assert white2 < 8.8 < 9.0
+
+
+class TestVarFftUncertainties:
+    """Uncertainty scheme of the FFT estimator.
+
+    - Mean and Variance: circular block bootstrap (same machinery as the
+      other estimators);
+    - y_bar_d (and the white variance): chi-square floor statistics,
+      sigma = value * sqrt(1/M) with k the kept floor bins — a first
+      approximation that ignores threshold clipping and Welch's segment
+      averaging;
+    - Covariance: unknown, reported as 0.
+    """
+
+    N_SMALL = 4000   # small enough that the bootstrap stays fast
+    LVL = 0.008      # white var 4.0 at fs 1000
+
+    def _channel(self, seed=20, n=N_SMALL):
+        rng = np.random.default_rng(seed)
+        return _synth_from_psd(lambda f: self.LVL, rng, offset=50.0, n=n)
+
+    def test_block_uncertainty_relations(self):
+        y = self._channel()
+        stats, diag = calculate_fft_block(y, FS)
+        k = int(np.count_nonzero(diag["kept_mask"]))
+        assert stats["M"] == k
+        assert stats["Covariance_unc"] == 0.0
+        assert stats["y_bar_d_unc"] == pytest.approx(
+            stats["y_bar_d"] * np.sqrt(1.0 / k)
+        )
+        assert stats["Mean_unc"] > 0.0
+        assert stats["Variance_unc"] > 0.0
+
+    def test_block_bootstrap_disabled_zeros_mean_var_unc(self):
+        y = self._channel()
+        stats, _ = calculate_fft_block(y, FS, calc_bootstrap=False)
+        assert stats["Mean_unc"] == 0.0
+        assert stats["Variance_unc"] == 0.0
+        # the sqrt(2/M) part is analytical: still computed
+        assert stats["y_bar_d_unc"] == pytest.approx(
+            stats["y_bar_d"] * np.sqrt(1.0 / stats["M"])
+        )
+
+    def test_k_counts_only_kept_bins(self):
+        y = self._channel()
+        stats_full, _ = calculate_fft_block(y, FS)
+        stats_kept, diag_kept = calculate_fft_block(y, FS, bands=[(0.0, 100.0)])
+        k_full = stats_full["M"]
+        k_kept = stats_kept["M"]
+        assert k_kept == int(np.count_nonzero(diag_kept["kept_mask"]))
+        assert k_kept < k_full
+        # excluding bins inflates the relative floor uncertainty by
+        # exactly sqrt(k_full / k_kept)
+        rel_full = stats_full["y_bar_d_unc"] / stats_full["y_bar_d"]
+        rel_kept = stats_kept["y_bar_d_unc"] / stats_kept["y_bar_d"]
+        assert rel_kept / rel_full == pytest.approx(
+            np.sqrt(k_full / k_kept), rel=1e-9
+        )
+
+    def test_results_slots_filled_with_bootstrap(self):
+        y = self._channel()
+        data = np.column_stack((y, y))
+        res = calculate_results(
+            data, calc_bootstrap=True, calc_fft=True, sample_freq_hz=FS,
+            fft_bands=[(0.0, 100.0)],
+        )
+        # fft_bands are the KEPT bands: bins with 0 < f <= 100 Hz
+        k = int(round(100.0 * self.N_SMALL / FS))
+        assert res["var_fft"]["M"][0] == k
+        assert res["var_fft"]["M"][2] == k
+        assert res["var_fft"]["Covariance"][1] == 0.0
+        assert res["var_fft"]["Mean"][1] > 0.0
+        assert res["var_fft"]["Variance"][1] > 0.0
+        assert res["var_fft"]["y_bar_d"][1] == pytest.approx(
+            res["var_fft"]["y_bar_d"][0] * np.sqrt(1.0 / k)
+        )
+        assert res["var_fft"]["y_bar_d"][3] == pytest.approx(
+            res["var_fft"]["y_bar_d"][0] * np.sqrt(1.0 / k)
+        )
+
+    def test_bootstrap_uncertainty_magnitude_plausible(self):
+        # iid white noise: the bootstrap mean uncertainty must track the
+        # analytical sqrt(var/n) within a factor of ~2
+        y = self._channel()
+        stats, _ = calculate_fft_block(y, FS)
+        analytical = np.sqrt(np.var(y, ddof=1) / len(y))
+        assert 0.5 * analytical < stats["Mean_unc"] < 2.0 * analytical
+
+    def test_not_computable_zero_uncertainties(self):
+        stats, diag = calculate_fft_block(np.array([1.0, np.nan]), FS)
+        assert stats["Mean_unc"] == 0.0
+        assert stats["Variance_unc"] == 0.0
+        assert stats["y_bar_d_unc"] == 0.0
+        assert stats["M"] == 0
+
+    def test_fft_cov_var_ratio_nonwhite_fraction_zero_unc(self):
+        # white 4.0 + plateau 6.4 + 0.5-variance line: total 10.9, of which
+        # 6.9 is non-white -> ratio ~ 0.63; the uncertainty is unknown -> 0
+        rng = np.random.default_rng(27)
+        y = _synth_from_psd(
+            lambda f: np.where(f < 100.0, self.LVL, 3 * self.LVL),
+            rng,
+            lines=[(250.0, 0.5)],
+            offset=50.0,
+        )
+        data = np.column_stack((y, y))
+        res = calculate_results(
+            data, calc_bootstrap=False, calc_fft=True, sample_freq_hz=FS,
+            fft_bands=[(0.0, 100.0)],
+        )
+        ratio = res["var_fft"]["cov_var_ratio"]
+        assert ratio[0] == pytest.approx(
+            res["var_fft"]["Covariance"][0] / res["var_fft"]["Variance"][0]
+        )
+        assert ratio[0] == pytest.approx(6.9 / 10.9, abs=0.08)
+        assert ratio[1] == 0.0
+        assert ratio[3] == 0.0
+        # not-computable block: the ratio defaults to zero as well
+        stats, _ = calculate_fft_block(np.array([1.0, np.nan]), FS)
+        assert stats["cov_var_ratio"] == 0.0
+        assert stats["cov_var_ratio_unc"] == 0.0
 
 
 def test_spectral_peaks_gap_merge():

@@ -95,6 +95,21 @@ def test_each_method_lists_only_its_own_parameters():
     # var_fft has covariance but no mean_sq diagnostics
     assert "fft_covariance_ch1" in catalog
     assert "fft_cov_mean_sq_ch1" not in catalog
+    # M (kept floor bins) exists only for the FFT method
+    assert "fft_m_ch1" in catalog
+    assert "var_m_ch1" not in catalog
+    assert "varcov_m_ch1" not in catalog
+    # the cov/var ratio exists for every method that has a covariance term
+    assert "varcov_cov_var_ratio_ch1" in catalog
+    assert "doublecov_cov_var_ratio_ch2" in catalog
+    assert "autocov_autocov_var_ratio_ch1" in catalog
+    assert "fft_cov_var_ratio_ch1" in catalog
+    # ... but not for the plain variance method, and not cross-method
+    assert "var_cov_var_ratio_ch1" not in catalog
+    assert "varcov_autocov_var_ratio_ch1" not in catalog
+    assert "fft_autocov_var_ratio_ch1" not in catalog
+    # dimensionless: no charge-unit variants
+    assert "varcov_cov_var_ratio_pc_ch1" not in catalog
 
 
 def test_default_catalog_is_cached():
@@ -113,6 +128,21 @@ def test_result_value_and_uncertainty_extracted():
     val, unc = cat.get("autocov_yd_ch1").extract(fake_settings())
     assert val == pytest.approx(1.5)
     assert unc == pytest.approx(0.05)
+
+
+def test_cov_var_ratio_variable_extracted():
+    """The archived cov/var ratio extracts like any other result slot."""
+    cat = default_catalog()
+    settings = fake_settings()
+    settings["analysis"]["results"]["var_autocov"]["autocov_var_ratio"] = [
+        0.33, 0.012, 0, 0,
+    ]
+    val, unc = cat.get("autocov_autocov_var_ratio_ch1").extract(settings)
+    assert val == pytest.approx(0.33)
+    assert unc == pytest.approx(0.012)
+    # absent in the archive (pre-update archives) -> NaN, never a crash
+    val, unc = cat.get("autocov_autocov_var_ratio_ch1").extract(fake_settings())
+    assert math.isnan(val) and math.isnan(unc)
 
 
 def test_missing_macro_is_nan():

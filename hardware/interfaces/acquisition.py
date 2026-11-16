@@ -31,9 +31,12 @@ class IDataAcquisition(ABC):
         how each signal reaches the device.  `channel_plan` is a list of
         (channel_id, termination) pairs — e.g. [("ch1", "differential"),
         ("ch2", "rse")] — derived from the loaded hardware config by the
-        HardwareManager.  Drivers that don't care (µC firmware with fixed
-        inputs) keep this no-op; instrument drivers map the pairs onto
-        their physical input terminals."""
+        HardwareManager, each optionally carrying a third element
+        `adc_input` naming the physical input (e.g. "AI6" on a NI card)
+        that overrides the driver's default terminal for that channel.
+        Drivers that don't care (µC firmware with fixed inputs) keep this
+        no-op; instrument drivers map the entries onto their physical
+        input terminals, rejecting values they cannot wire."""
         return True
 
     @abstractmethod

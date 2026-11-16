@@ -21,6 +21,10 @@ from PyQt6.QtWidgets import (
 )
 
 from views.analysis_widget import AnalysisWidget
+from hardware.pico.pico_daq import (
+    TRANSIENT_TEST_INT_MAX_US,
+    TRANSIENT_TEST_SILENT_MAX_US,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +35,10 @@ pg.setConfigOption("foreground", "k")
 
 class TimeWindow(QWidget):
     sent_successfull = pyqtSignal()
+    live_ramp_requested = pyqtSignal()
     editing_time = pyqtSignal()
     apply_configuration_requested = pyqtSignal(dict)
-    timing_calculation_requested = pyqtSignal(float, float, object, object)
+    timing_calculation_requested = pyqtSignal(float, float, object, object, bool, bool)
 
     def __init__(self, session_model, simulate: bool, hardware_manager=None) -> None:
         super().__init__()
@@ -125,12 +130,14 @@ class TimeWindow(QWidget):
         self.final_int_time_label = QLabel("-")
         self.final_rst_time_label = QLabel("-")
         self.final_period_label = QLabel("-")
+        self.final_dt_label = QLabel("-")
         self.final_freq_label = QLabel("-")
 
         for lbl in [
             self.final_int_time_label,
             self.final_rst_time_label,
             self.final_period_label,
+            self.final_dt_label,
             self.final_freq_label,
         ]:
             lbl.setStyleSheet("font-size: 14pt; font-weight: bold; color: #1a252f;")
@@ -198,6 +205,45 @@ class TimeWindow(QWidget):
         ramp_dt_layout.addWidget(self.ramp_dt_input)
         ramp_dt_layout.addStretch(1)
 
+        # --- Transient Test (study mode; Pico 2.3+ timing only) ---
+        # dt pinned by an integer PIO divider (16 at 150 MHz -> 1.0667 us =
+        # 937.5 kS/s; exactly 1.000 us would run the acquisition card at
+        # its absolute 1 MS/s spec with zero margin), reset sweepable down
+        # to 1 us (below the validated measurement minimum), a one-tick
+        # (~107 ns) settle before the first conversion edge: samples the
+        # ramp right at the reset release.  The TRUE RAMP Δt tile shows
+        # the applied (quantized) dt.
+        self.transient_test_cb = QCheckBox("Transient Test (Δt ≈ 1.07 μs, reset from 1 μs)")
+        self.transient_test_cb.setStyleSheet("QCheckBox { font-size: 10pt; }")
+        self.transient_test_cb.setToolTip(
+            "Study mode: the timing device pins dt to 1.0667 us (nominal "
+            "1 us — exactly 1.000 us would clock the acquisition card at "
+            "its absolute 1 MS/s limit with zero margin) and generates "
+            "the first CONV_START edge one ~107 ns tick after the reset "
+            "release, so the front-end transient is visible in the ramp "
+            "data. The reset time becomes settable from 1 us (below the "
+            "validated measurement minimum — never use this mode for "
+            "measurements). The TRUE RAMP Δt tile shows the applied value."
+        )
+        self.transient_test_cb.stateChanged.connect(self._on_transient_toggled)
+
+        # --- Transient Test, sampling DURING the reset (study mode) ---
+        # Same generator family, pulses while RESET is LOW.  The two
+        # time fields are SWAPPED in this mode: Integration Time drives
+        # the sampled (pulsed) reset phase, Reset Time the silent
+        # integration.
+        self.transient_reset_cb = QCheckBox("Sample During Reset (times swapped)")
+        self.transient_reset_cb.setStyleSheet("QCheckBox { font-size: 10pt; }")
+        self.transient_reset_cb.setToolTip(
+            "Study mode: CONV_START pulses are generated DURING the reset "
+            "phase (the first edge coincides with the reset assertion) and "
+            "the integration phase is silent. The field meanings are "
+            "swapped: Integration Time = the sampled reset phase (from "
+            "1 us, one sample per dt ≈ 1.07 us), Reset Time = the silent "
+            "integration."
+        )
+        self.transient_reset_cb.stateChanged.connect(self._on_transient_reset_toggled)
+
         # --- Measurement & Beam Parameters Inputs ---
         self.beam_energy_input = QLineEdit(str(self.session.beam_energy_mev))
         self.beam_current_input = QLineEdit(str(self.session.beam_current_na))
@@ -239,6 +285,30 @@ class TimeWindow(QWidget):
             QPushButton:hover { background-color: #e0a800; }
         """)
         self.edit_bnt.clicked.connect(self.on_edit_press)
+
+        # Live ramp analysis: stream ramps through memory and keep only the
+        # results (averaged spectrum + CDS series) — the campaign mode for
+        # long ramps where recording every sample would fill the disk.
+        # Enabled only with the timing applied in ramp mode (markers mode
+        # holds 2 samples/window: no waveform to analyze).
+        self.live_ramp_bnt = QPushButton("Live Ramp Analysis…")
+        self.live_ramp_bnt.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.live_ramp_bnt.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8; color: white; font-weight: bold;
+                padding: 10px 18px; font-size: 12pt; border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #138496; }
+            QPushButton:disabled { background-color: #6c757d; }
+        """)
+        self.live_ramp_bnt.setEnabled(False)
+        self.live_ramp_bnt.setToolTip(
+            "Stream ramps through memory and keep only the results "
+            "(averaged FFT + correlated double sampling).\n\n"
+            "Requires the timing configuration applied with ramp "
+            "sampling enabled."
+        )
+        self.live_ramp_bnt.clicked.connect(self.live_ramp_requested.emit)
 
         self.status_icon = QLabel()
         self.status_icon.setStyleSheet("border: none;")
@@ -324,6 +394,8 @@ class TimeWindow(QWidget):
         # Ramp Sampling Row
         t_form.addRow("", self.sample_ramp_cb)
         t_form.addRow("", self.ramp_dt_widget)
+        t_form.addRow("", self.transient_test_cb)
+        t_form.addRow("", self.transient_reset_cb)
 
         cards_layout.addWidget(time_group, 1)
 
@@ -370,6 +442,7 @@ class TimeWindow(QWidget):
         sum_layout.addLayout(create_stat_tile("TRUE INTEGRATION", self.final_int_time_label))
         sum_layout.addLayout(create_stat_tile("TRUE RESET TIME", self.final_rst_time_label))
         sum_layout.addLayout(create_stat_tile("TRUE PERIOD", self.final_period_label))
+        sum_layout.addLayout(create_stat_tile("TRUE RAMP Δt", self.final_dt_label))
         sum_layout.addLayout(create_stat_tile("SAMPLE FREQUENCY", self.final_freq_label))
 
         content_layout.addWidget(self.summary_frame)
@@ -382,6 +455,7 @@ class TimeWindow(QWidget):
         footer.addWidget(self.status_frame, 1)
         footer.addWidget(self.edit_bnt)
         footer.addWidget(self.send_bnt)
+        footer.addWidget(self.live_ramp_bnt)
         master.addLayout(footer)
 
     def on_meta_edit(self):
@@ -406,6 +480,45 @@ class TimeWindow(QWidget):
             pass
 
         self.session.measurement_note = self.meas_note_input.toPlainText()
+
+    def _transient_mode(self):
+        """Which transient study mode is active: 'integration' (pulses
+        during the ramp), 'reset' (pulses during the reset LOW, the two
+        time fields swapped), or None (normal timing)."""
+        for mode, cb in (("integration", self.transient_test_cb),
+                         ("reset", self.transient_reset_cb)):
+            if cb.isVisible() and cb.isEnabled() and cb.isChecked():
+                return mode
+        return None
+
+    def _transient_active(self) -> bool:
+        """Backward-compatible boolean view of _transient_mode()."""
+        return self._transient_mode() is not None
+
+    def _on_transient_toggled(self, _state: int):
+        """Checking a study mode forces the ramp path with dt pinned by
+        the firmware's integer divider (nominal 1 us, applied 1.0667 us —
+        shown in the TRUE RAMP Δt tile); the two modes are mutually
+        exclusive; unchecking restores normal editing."""
+        if self.transient_test_cb.isChecked():
+            self.transient_reset_cb.blockSignals(True)
+            self.transient_reset_cb.setChecked(False)
+            self.transient_reset_cb.blockSignals(False)
+            self.sample_ramp_cb.setChecked(True)
+            self.ramp_dt_input.setText("1")
+        self.ramp_dt_input.setEnabled(self._transient_mode() is None)
+        self.on_manual_edit()
+
+    def _on_transient_reset_toggled(self, _state: int):
+        """Same as _on_transient_toggled for the reset-sampling mode."""
+        if self.transient_reset_cb.isChecked():
+            self.transient_test_cb.blockSignals(True)
+            self.transient_test_cb.setChecked(False)
+            self.transient_test_cb.blockSignals(False)
+            self.sample_ramp_cb.setChecked(True)
+            self.ramp_dt_input.setText("1")
+        self.ramp_dt_input.setEnabled(self._transient_mode() is None)
+        self.on_manual_edit()
 
     def _collect_timing_values(self):
         """Parse the timing fields exactly as typed (seconds for the times,
@@ -448,10 +561,13 @@ class TimeWindow(QWidget):
         # and blocks Apply separately.
         final_dt = None
         if self.sample_ramp_cb.isVisible() and self.sample_ramp_cb.isChecked():
-            try:
-                final_dt = float(self.ramp_dt_input.text())
-            except ValueError:
-                final_dt = None
+            if self._transient_active():
+                final_dt = 1.0     # pinned by the transient-test firmware
+            else:
+                try:
+                    final_dt = float(self.ramp_dt_input.text())
+                except ValueError:
+                    final_dt = None
 
         return final_int, final_rst, final_period, final_dt
 
@@ -466,7 +582,11 @@ class TimeWindow(QWidget):
             # config; out-of-bounds inputs are highlighted and block Apply
             # (the drivers would reject them at configure time).
             self._inputs_valid = self._validate_timing_inputs(final_int, final_rst, final_period)
-            self.timing_calculation_requested.emit(final_int, final_rst, final_period, final_dt)
+            mode = self._transient_mode()
+            self.timing_calculation_requested.emit(
+                final_int, final_rst, final_period, final_dt,
+                mode == "integration", mode == "reset",
+            )
         except ValueError:
             self._inputs_valid = False
         self._update_apply_enabled()
@@ -502,8 +622,38 @@ class TimeWindow(QWidget):
         return valid
 
     def _validate_timing_inputs(self, final_int_s: float, final_rst_s: float, final_period_s: float) -> bool:
-        valid = self._field_within_envelope(self.int_time, final_int_s * 1e6, "integration_time_us")
-        valid &= self._field_within_envelope(self.rst_time, final_rst_s * 1e6, "reset_time_us")
+        valid = True
+        mode = self._transient_mode()
+        if mode == "integration":
+            # Test mode: the reset may go below the declared envelope floor
+            # (the firmware sweep starts at 1 us); the INTEGRATION may go
+            # far above the 10 s measurement envelope (tens of seconds and
+            # more — the generators' 32-bit pulse counts allow ~70 min).
+            bounds = self._timing_param("reset_time_us")
+            rst_ok = final_rst_s * 1e6 >= 1.0
+            if "max" in bounds:
+                rst_ok &= final_rst_s * 1e6 <= bounds["max"]
+            self.rst_time.setStyleSheet("" if rst_ok else "border: 1px solid #dc3545;")
+            valid &= rst_ok
+            int_ok = 5.0 <= final_int_s * 1e6 <= TRANSIENT_TEST_INT_MAX_US
+            self.int_time.setStyleSheet("" if int_ok else "border: 1px solid #dc3545;")
+            valid &= int_ok
+        elif mode == "reset":
+            # Swapped: the INTEGRATION field drives the sampled pulsed
+            # reset phase (floor 1 us); the RESET field drives the silent
+            # integration (normal declared bounds).
+            # Swapped: the INTEGRATION field drives the sampled pulsed
+            # reset phase (1 us .. 1 h of pulsed train); the RESET field
+            # the silent integration (1 us .. 5 min in ~107 ns ticks).
+            int_ok = 1.0 <= final_int_s * 1e6 <= TRANSIENT_TEST_INT_MAX_US
+            self.int_time.setStyleSheet("" if int_ok else "border: 1px solid #dc3545;")
+            valid &= int_ok
+            rst_ok = 1.0 <= final_rst_s * 1e6 <= TRANSIENT_TEST_SILENT_MAX_US
+            self.rst_time.setStyleSheet("" if rst_ok else "border: 1px solid #dc3545;")
+            valid &= rst_ok
+        else:
+            valid &= self._field_within_envelope(self.int_time, final_int_s * 1e6, "integration_time_us")
+            valid &= self._field_within_envelope(self.rst_time, final_rst_s * 1e6, "reset_time_us")
         if final_period_s is not None:
             valid &= self._field_within_envelope(self.period_time, final_period_s * 1e6, "period_us")
 
@@ -650,6 +800,18 @@ class TimeWindow(QWidget):
         else:
             self.sample_ramp_cb.setToolTip("")
 
+        # Transient test: only on timing devices that implement it, and
+        # only when ramp generation is possible at all.
+        transient_supported = self._ramp_allowed and manager.transient_test_supported
+        self.transient_test_cb.setVisible(supports_ramp)
+        self.transient_test_cb.setEnabled(transient_supported)
+        if not transient_supported:
+            self.transient_test_cb.setChecked(False)
+        self.transient_reset_cb.setVisible(supports_ramp)
+        self.transient_reset_cb.setEnabled(transient_supported)
+        if not transient_supported:
+            self.transient_reset_cb.setChecked(False)
+
         # ADC Input Range
         adc_settings = manager.get_adc_settings() if is_loaded else {}
         ranges = adc_settings.get("input_ranges_volts", [])
@@ -701,6 +863,14 @@ class TimeWindow(QWidget):
         self.final_int_time_label.setText(self._format_time_us(actual.int_time_us))
         self.final_rst_time_label.setText(self._format_time_us(actual.reset_time_us))
         self.final_period_label.setText(self._format_time_us(actual.period_us))
+        # The APPLIED ramp dt (the timing driver's quantized value — e.g.
+        # the transient test mode's pinned 1.0667 us for the nominal "1 us"),
+        # so the nominal-vs-real difference is always visible.
+        dt_us = getattr(actual, "ramp_dt_eff_us", None)
+        # 6 significant digits: the applied dt differs from the request in
+        # the 4th digit upward (divider round-up: 1 -> 1.00026 us) and the
+        # tile must show it, not round it back to the nominal value.
+        self.final_dt_label.setText(f"{dt_us:.6g} μs" if dt_us else "-")
         freq = actual.sample_frequency_hz
         self.final_freq_label.setText(f"{freq:.2f} Hz" if freq > 0 else "-")
 
@@ -717,6 +887,11 @@ class TimeWindow(QWidget):
         self.final_int_time_label.setText(self._format_time_us(int_us))
         self.final_rst_time_label.setText(self._format_time_us(rst_us))
         self.final_period_label.setText(self._format_time_us(prd_us))
+        dt_us = self.session.ramp_dt_s * 1e6 if getattr(self.session, "ramp_dt_s", 0) else None
+        # 6 significant digits: the applied dt differs from the request in
+        # the 4th digit upward (divider round-up: 1 -> 1.00026 us) and the
+        # tile must show it, not round it back to the nominal value.
+        self.final_dt_label.setText(f"{dt_us:.6g} μs" if dt_us else "-")
         self.final_freq_label.setText(
             f"{self.session.sample_freq:.2f} Hz" if self.session.sample_freq > 0 else "-"
         )
@@ -745,6 +920,8 @@ class TimeWindow(QWidget):
             "period_us": period_us,
             "sample_ramp": self.sample_ramp_cb.isChecked() and self._ramp_allowed,
             "ramp_dt_us": final_dt if final_dt is not None else 10.0,
+            "transient_test": self._transient_mode() == "integration",
+            "transient_reset": self._transient_mode() == "reset",
             "gain_ch1_label": self.capacitance_combo_ch1.currentText(),
             "gain_ch2_label": self.capacitance_combo_ch2.currentText() if self.capacitance_combo_ch2.isVisible() else None,
         }
@@ -808,6 +985,12 @@ class TimeWindow(QWidget):
     def toggle_ui_lock(self, locked: bool):
         self.send_bnt.setVisible(not locked)
         self.edit_bnt.setVisible(locked)
+        # Live ramp analysis only makes sense with the applied timing in
+        # ramp mode (the full window waveform); the session's timing_mode is
+        # refreshed from the driver mirror before the apply result arrives.
+        self.live_ramp_bnt.setEnabled(
+            locked and self.session.timing_mode == "ramp"
+        )
         self.int_time.setEnabled(not locked)
         self.rst_time.setEnabled(not locked)
         self.period_time.setEnabled(not locked)
@@ -815,7 +998,15 @@ class TimeWindow(QWidget):
         self.magnitude_rst.setEnabled(not locked)
         self.magnitude_period.setEnabled(not locked)
         self.sample_ramp_cb.setEnabled(not locked and self._ramp_allowed)
-        self.ramp_dt_input.setEnabled(not locked)
+        self.ramp_dt_input.setEnabled(
+            not locked and self._transient_mode() is None
+        )
+        transient_ok = (
+            not locked and self._ramp_allowed
+            and bool(self.hardware_manager and self.hardware_manager.transient_test_supported)
+        )
+        self.transient_test_cb.setEnabled(transient_ok)
+        self.transient_reset_cb.setEnabled(transient_ok)
         self.capacitance_combo_ch1.setEnabled(not locked)
         # CH2 enablement on unlock comes from the wiring-aware option filter,
         # not from "any pin is shared": mixed topologies keep CH2 selectable.

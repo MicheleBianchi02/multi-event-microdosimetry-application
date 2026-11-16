@@ -72,10 +72,10 @@ RESULT_MACRO_LABELS = {
 # parameters, e.g. the plain variance method has no covariance term).
 RESULT_MACRO_PARAMS = {
     "var": ("N", "Mean", "Variance", "y_bar_d"),
-    "var_cov": ("N", "Mean", "Variance", "Covariance", "y_bar_d", "cov_mean_sq"),
-    "var_autocov": ("N", "Mean", "Variance", "AutoCorrelation", "y_bar_d", "autocov_mean_sq"),
-    "var_doublecov": ("N", "Mean", "Variance", "Covariance", "y_bar_d", "cov_mean_sq"),
-    "var_fft": ("N", "Mean", "Variance", "Covariance", "y_bar_d"),
+    "var_cov": ("N", "Mean", "Variance", "Covariance", "y_bar_d", "cov_mean_sq", "cov_var_ratio"),
+    "var_autocov": ("N", "Mean", "Variance", "AutoCorrelation", "y_bar_d", "autocov_mean_sq", "autocov_var_ratio"),
+    "var_doublecov": ("N", "Mean", "Variance", "Covariance", "y_bar_d", "cov_mean_sq", "cov_var_ratio"),
+    "var_fft": ("N", "M", "Mean", "Variance", "Covariance", "y_bar_d", "cov_var_ratio"),
 }
 
 # macro key -> formula id prefix
@@ -90,6 +90,7 @@ RESULT_MACRO_PREFIX = {
 # parameter key -> (id suffix, display label, unit in counts)
 RESULT_PARAM_LABELS = {
     "N": ("n", "N samples", ""),
+    "M": ("m", "M floor bins", ""),
     "Mean": ("mean", "Mean", "counts"),
     "Variance": ("variance", "Variance", "counts²"),
     "Covariance": ("covariance", "Covariance", "counts²"),
@@ -97,6 +98,8 @@ RESULT_PARAM_LABELS = {
     "y_bar_d": ("yd", "ȳ_D", "counts"),
     "cov_mean_sq": ("cov_mean_sq", "Cov / Mean²", ""),
     "autocov_mean_sq": ("autocov_mean_sq", "AutoCov / Mean²", ""),
+    "cov_var_ratio": ("cov_var_ratio", "Cov / Var", ""),
+    "autocov_var_ratio": ("autocov_var_ratio", "AutoCov / Var", ""),
 }
 
 # parameters converted to charge units: linear ones scale by the

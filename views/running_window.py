@@ -91,8 +91,27 @@ class RunningWindow(QWidget):
         # Histogram geometry follows the active ADC depth (B6): rebuilt
         # whenever the configured bits change (config applied, archive loaded).
         self.session.adc_bits_changed.connect(self._sync_mca_geometry)
+        # The volt/charge scaling follows the input range APPLIED on the
+        # acquisition device (B23): Apply Configuration and archive loads
+        # push it into the ADC Range spinboxes (still user-editable — the
+        # fallback for simulation and legacy files).
+        self.session.adc_input_range_changed.connect(self._on_applied_adc_range)
+
+    def _on_applied_adc_range(self, min_volts: float, max_volts: float):
+        """B23: follow the input range actually applied on the acquisition
+        device (Apply Configuration) / recorded in a loaded archive — e.g.
+        the NI card's ±5 V (span 10 V) instead of the 5 V simulation
+        default."""
+        self.setting_tab.adc_min_volts = min_volts
+        self.setting_tab.adc_range = max_volts - min_volts
+        self.setting_tab.update_signal.emit()
 
     def init_variables(self):
+        # Drop the ROI region items from the plot *before* the dicts are
+        # rebound: on restart the settings-tab widgets that owned them are
+        # deleted, and region items left in the plot (with their live
+        # sigRegionChanged handlers) would outlive them.
+        self._discard_roi_regions()
         self.chart_type = "mc"
         self.central_widget_type = "plot"
         self.already_saved = False
@@ -104,6 +123,28 @@ class RunningWindow(QWidget):
         self.calib_scatter = None
         self.detected_peaks = []
 
+    def _discard_roi_regions(self):
+        """Remove every ROI region from the plot (called when the state is
+        reset, e.g. at restart)."""
+        if getattr(self, "plot_widget", None) is None:
+            return  # first call from __init__, before init_ui()
+        for regions in getattr(self, "channel_roi_regions", {}).values():
+            self._remove_region(regions["mc"])
+            self._remove_region(regions["time"])
+        for region in getattr(self, "time_roi_regions", {}).values():
+            self._remove_region(region)
+
+    def _remove_region(self, region):
+        # Disconnect the handler first: an orphaned region must never call
+        # back into a ROI widget that may already be deleted.
+        handler = getattr(region, "_update_handler", None)
+        if handler is not None:
+            try:
+                region.sigRegionChanged.disconnect(handler)
+            except TypeError:
+                pass  # already disconnected
+        self.plot_widget.removeItem(region)
+
     @property
     def num_bins(self) -> int:
         """Histogram bins of the active ADC (B6): follows the data model, so
@@ -111,16 +152,49 @@ class RunningWindow(QWidget):
         ADC depth (4096 default, e.g. 65536 with a 16-bit digitizer)."""
         return self.data_model.num_bins
 
+    @property
+    def counts_full_scale(self) -> int:
+        """Full-scale count of the active ADC — the exact denominator of the
+        drivers' volts→counts conversion (the NI driver maps a reading to
+        zero-based counts over 0..2^bits−1; the Pico's ADC tops at 4095):
+        one count below the histogram bin count."""
+        return self.num_bins - 1
+
+    # Display cap for the MCA histogram.  The model keeps the full 2^bits
+    # resolution, but a 20-bit digitizer would feed the plot >1e6 points
+    # per curve on EVERY dashboard refresh — extreme lag, and the
+    # million-vertex filled step polygons eventually crash Qt's raster
+    # engine silently (no Python exception, no log).  Rebin for display:
+    # MCA_DISPLAY_BINS aggregated native bins per drawn bin (power of two,
+    # so the x axis stays an exact counts scale).
+    MCA_DISPLAY_BINS = 8192
+
+    @property
+    def mca_rebin(self) -> int:
+        """Native bins aggregated into one displayed MCA bin."""
+        return max(1, self.num_bins // self.MCA_DISPLAY_BINS)
+
+    @property
+    def mca_display_bins(self) -> int:
+        return self.num_bins // self.mca_rebin
+
+    def _rebin_mca(self, bar):
+        """Aggregate full-resolution histogram bins for display (sum)."""
+        r = self.mca_rebin
+        if r == 1:
+            return bar
+        return bar.astype(np.int64).reshape(-1, r).sum(axis=1)
+
     def _sync_mca_geometry(self, *_args):
         """Rebuild the MCA curves when the bin count changed after the plot
         items were created (keep x axis and curve length consistent)."""
         if getattr(self, "mca_item_ch1", None) is None:
             return
-        if len(self.mca_x_axis) == self.num_bins + 1:
+        if len(self.mca_x_axis) == self.mca_display_bins + 1:
             return
-        self.mca_x_axis = np.arange(self.num_bins + 1)
-        self.mca_item_ch1.setData(self.mca_x_axis, np.zeros(self.num_bins))
-        self.mca_item_ch2.setData(self.mca_x_axis, np.zeros(self.num_bins))
+        self.mca_x_axis = np.arange(self.mca_display_bins + 1) * self.mca_rebin
+        self.mca_item_ch1.setData(self.mca_x_axis, np.zeros(self.mca_display_bins))
+        self.mca_item_ch2.setData(self.mca_x_axis, np.zeros(self.mca_display_bins))
 
     def clear_plot(self):
         """Clears the underlying data model and refreshes the plots/dashboard to wipe previous state."""
@@ -490,10 +564,10 @@ class RunningWindow(QWidget):
                 self.view_time_btn.setChecked(True)
 
     def init_plot_items(self):
-        self.mca_x_axis = np.arange(self.num_bins + 1)
+        self.mca_x_axis = np.arange(self.mca_display_bins + 1) * self.mca_rebin
         self.mca_item_ch1 = pg.PlotCurveItem(
             self.mca_x_axis,
-            np.zeros(self.num_bins),
+            np.zeros(self.mca_display_bins),
             pen=pg.mkPen(color="#0078d7", width=2),
             brush=pg.mkBrush(color="#0078d7"),
             stepMode=True,
@@ -502,7 +576,7 @@ class RunningWindow(QWidget):
         )
         self.mca_item_ch2 = pg.PlotCurveItem(
             self.mca_x_axis,
-            np.zeros(self.num_bins),
+            np.zeros(self.mca_display_bins),
             pen=pg.mkPen(color="#d9534f", width=2),
             brush=pg.mkBrush(color="#d9534f"),
             stepMode=True,
@@ -547,9 +621,6 @@ class RunningWindow(QWidget):
             symbolSize=4,
             connect="finite",
         )
-
-        self.nan_marker_item_ch1 = None
-        self.nan_marker_item_ch2 = None
 
         self.init_mc_chart()
 
@@ -970,12 +1041,29 @@ class RunningWindow(QWidget):
             self.var_cov_n_bootstrap.setText(str(n_boots))
         except:
             self.var_cov_n_bootstrap.setText("-")
+        # Per-channel counts→display-unit factor (1.0 in Channel mode):
+        # V = counts·ΔV/count over the full-scale count, Q[pC] = C[pF]·V —
+        # Voltage and Charge stay mutually consistent (V = Q/C).
         if self.setting_tab.show_type == self.setting_tab.CHARGE:
-            is_charge = True
             unit = "pC"
+            factor_ch1 = (
+                self.session.capacitance_pf_ch1
+                * self.setting_tab.adc_range
+                / self.counts_full_scale
+            )
+            factor_ch2 = (
+                self.session.capacitance_pf_ch2
+                * self.setting_tab.adc_range
+                / self.counts_full_scale
+            )
+        elif self.setting_tab.show_type == self.setting_tab.VOLTAGE:
+            unit = "V"
+            factor_ch1 = self.setting_tab.adc_range / self.counts_full_scale
+            factor_ch2 = factor_ch1
         else:
             unit = "Ch"
-            is_charge = False
+            factor_ch1 = 1.0
+            factor_ch2 = 1.0
 
         for macro_name, parameters in self.data_model.result.items():
             for param_name, values in parameters.items():
@@ -986,57 +1074,42 @@ class RunningWindow(QWidget):
                 if param_name in ["Variance", "Covariance", "AutoCorrelation"]:
                     labels["name"].setText(f"{param_name} ({unit}²):")
 
-                    if is_charge:
-                        factor_ch1 = (
-                            self.session.capacitance_pf_ch1
-                            * self.setting_tab.adc_range
-                            / self.num_bins
-                        ) ** 2
-                        factor_ch2 = (
-                            self.session.capacitance_pf_ch2
-                            * self.setting_tab.adc_range
-                            / self.num_bins
-                        ) ** 2
+                    ch1_val = ch1_val * factor_ch1**2
+                    ch1_unc = ch1_unc * factor_ch1**2
 
-                        ch1_val = ch1_val * factor_ch1
-                        ch1_unc = ch1_unc * factor_ch1
+                    ch2_val = ch2_val * factor_ch2**2
+                    ch2_unc = ch2_unc * factor_ch2**2
 
-                        ch2_val = ch2_val * factor_ch2
-                        ch2_unc = ch2_unc * factor_ch2
-
-                elif param_name == "N":
+                elif param_name in ("N", "M"):
+                    # plain counts (samples / kept FFT bins): no ±, no unit
                     labels["name"].setText(f"{param_name}")
                     ch1_unc = None
                     ch2_unc = None
 
-                elif param_name in ["cov_mean_sq", "autocov_mean_sq"]:
-                    if param_name == "cov_mean_sq":
-                        disp_name = "Cov / Mean²"
-                    else:
-                        disp_name = "AutoCov / Mean²"
-                    labels["name"].setText(f"{disp_name}")
+                elif param_name in [
+                    "cov_mean_sq",
+                    "autocov_mean_sq",
+                    "cov_var_ratio",
+                    "autocov_var_ratio",
+                ]:
+                    # dimensionless ratios: no unit, no counts→charge conversion
+                    disp_names = {
+                        "cov_mean_sq": "Cov / Mean²",
+                        "autocov_mean_sq": "AutoCov / Mean²",
+                        "cov_var_ratio": "Cov / Var",
+                        "autocov_var_ratio": "AutoCov / Var",
+                    }
+                    labels["name"].setText(disp_names[param_name])
 
                 else:
                     if param_name == "y_bar_d":
                         param_name = '<span style="text-decoration: overline;">y</span><sub>D</sub>'
                     labels["name"].setText(f"{param_name} ({unit}):")
-                    if is_charge:
-                        factor_ch1 = (
-                            self.session.capacitance_pf_ch1
-                            * self.setting_tab.adc_range
-                            / self.num_bins
-                        )
-                        factor_ch2 = (
-                            self.session.capacitance_pf_ch2
-                            * self.setting_tab.adc_range
-                            / self.num_bins
-                        )
+                    ch1_val = ch1_val * factor_ch1
+                    ch1_unc = ch1_unc * factor_ch1
 
-                        ch1_val = ch1_val * factor_ch1
-                        ch1_unc = ch1_unc * factor_ch1
-
-                        ch2_val = ch2_val * factor_ch2
-                        ch2_unc = ch2_unc * factor_ch2
+                    ch2_val = ch2_val * factor_ch2
+                    ch2_unc = ch2_unc * factor_ch2
 
                 # Convert uncertainty to string to count leading zeros after decimal
 
@@ -1242,6 +1315,7 @@ class RunningWindow(QWidget):
                 region.setVisible(True)
 
         region.sigRegionChanged.connect(update_widget)
+        region._update_handler = update_widget
         roi_widget.update_signal.connect(update_region)
 
     def hide_time_roi_regions(self):
@@ -1252,16 +1326,18 @@ class RunningWindow(QWidget):
     def on_time_roi_removed(self, roi_widget):
         if roi_widget in self.time_roi_regions:
             region = self.time_roi_regions.pop(roi_widget)
-            self.plot_widget.removeItem(region)
+            self._remove_region(region)
 
     def _get_channel_roi_factor(self, selected_channel):
         if self.setting_tab.show_type == self.setting_tab.CHANNEL:
             return 1.0
+        if self.setting_tab.show_type == self.setting_tab.VOLTAGE:
+            return self.setting_tab.adc_range / self.counts_full_scale
         if selected_channel == 1:
             return (
                 self.session.capacitance_pf_ch1 * self.setting_tab.adc_range
-            ) / self.num_bins
-        return (self.session.capacitance_pf_ch2 * self.setting_tab.adc_range) / self.num_bins
+            ) / self.counts_full_scale
+        return (self.session.capacitance_pf_ch2 * self.setting_tab.adc_range) / self.counts_full_scale
 
     def on_channel_roi_added(self, roi_widget):
         factor = self._get_channel_roi_factor(roi_widget.selected_channel)
@@ -1342,6 +1418,8 @@ class RunningWindow(QWidget):
 
         mc_region.sigRegionChanged.connect(update_from_mc_region)
         time_region.sigRegionChanged.connect(update_from_time_region)
+        mc_region._update_handler = update_from_mc_region
+        time_region._update_handler = update_from_time_region
         roi_widget.update_signal.connect(update_regions)
 
     def hide_channel_roi_regions(self):
@@ -1354,8 +1432,8 @@ class RunningWindow(QWidget):
     def on_channel_roi_removed(self, roi_widget):
         if roi_widget in self.channel_roi_regions:
             regions = self.channel_roi_regions.pop(roi_widget)
-            self.plot_widget.removeItem(regions["mc"])
-            self.plot_widget.removeItem(regions["time"])
+            self._remove_region(regions["mc"])
+            self._remove_region(regions["time"])
 
     def init_mc_chart(self, update: bool = False):
         """Initialize/Update the multichannel chart. If update is True,
@@ -1378,7 +1456,6 @@ class RunningWindow(QWidget):
             if getattr(regions["mc"], "_user_visible", True):
                 regions["mc"].setVisible(True)
         self.moving_widget.setVisible(False)
-        self.remove_overflow_marker()
         self.plot_widget.setLabel("left", "Counts")
         if self.setting_tab.show_type == self.setting_tab.CHANNEL:
             self.plot_widget.setXRange(0, self.num_bins + 1)
@@ -1395,6 +1472,9 @@ class RunningWindow(QWidget):
             )
             self.plot_widget.setXRange(0, max_charge)
             self.plot_widget.setLabel("bottom", "Charge [pC]")
+        elif self.setting_tab.show_type == self.setting_tab.VOLTAGE:
+            self.plot_widget.setXRange(0, self.setting_tab.adc_range)
+            self.plot_widget.setLabel("bottom", "Voltage [V]")
 
         self.plot_widget.getAxis("bottom").setScale(1)
         self.plot_widget.setYRange(0, 10)
@@ -1440,10 +1520,22 @@ class RunningWindow(QWidget):
                 ]
             ) * (self.setting_tab.adc_range)
             self.plot_widget.setYRange(0, max_charge)
+        elif self.setting_tab.show_type == self.setting_tab.VOLTAGE:
+            self.plot_widget.setLabel("left", "Voltage [V]")
+            self.plot_widget.setXRange(0, 1)
+            # the full ADC window: the absolute start/stop curves live in it
+            # (differences fill 0..span starting at the range minimum)
+            self.plot_widget.setYRange(
+                self.setting_tab.adc_min_volts,
+                self.setting_tab.adc_min_volts + self.setting_tab.adc_range,
+            )
 
-        self.plot_widget.getAxis("bottom").setScale(
-            self.session.int_time + self.session.reset_time
-        )
+        # The APPLIED sample period (1 / sample_freq): the mirror's period
+        # includes every dead time (settle, generator overhead) and is the
+        # same basis as the archived timestamps.  int + reset is only exact
+        # in internal timing — in ramp/markers mode it shifted the axis by
+        # up to ~4x against data.csv.
+        self.plot_widget.getAxis("bottom").setScale(self.session.sample_period_s)
         self.plot_widget.setLabel("bottom", "Time [s]")
 
         is_moving = self.chart_time_mode_box.currentIndex() == 0
@@ -1570,9 +1662,13 @@ class RunningWindow(QWidget):
 
     def show_mc(self):
         self._sync_mca_geometry()
+        # Rebin BEFORE the log: the displayed bin is the SUM of its native
+        # bins (log-of-sum, not sum-of-logs).
+        ch1_linear = self._rebin_mca(self.data_model.bar_data_ch1)
+        ch2_linear = self._rebin_mca(self.data_model.bar_data_ch2)
         if self.show_plt_log_y.isChecked():
-            ch1_log = self.data_model.bar_data_ch1.astype(float)
-            ch2_log = self.data_model.bar_data_ch2.astype(float)
+            ch1_log = ch1_linear.astype(float)
+            ch2_log = ch2_linear.astype(float)
 
             # Use manual log10 scaling to avoid pyqtgraph's native LogMode bugs with stepMode
             ch1_log = np.log10(np.where(ch1_log > 0, ch1_log, 1))
@@ -1585,8 +1681,8 @@ class RunningWindow(QWidget):
             self.mca_item_ch2.setFillLevel(0)
 
         else:
-            ch1_log = self.data_model.bar_data_ch1
-            ch2_log = self.data_model.bar_data_ch2
+            ch1_log = ch1_linear
+            ch2_log = ch2_linear
             self.plot_widget.setLogMode(False, False)
             if self.chart_type == "mc":
                 self.plot_widget.setLabel("left", "Counts")
@@ -1604,11 +1700,17 @@ class RunningWindow(QWidget):
                 self.session.capacitance_pf_ch2 * self.setting_tab.adc_range
             )
             self.mca_item_ch1.setData(
-                self.mca_x_axis / self.num_bins * max_charge_ch1, ch1_log
+                self.mca_x_axis / self.counts_full_scale * max_charge_ch1, ch1_log
             )
             self.mca_item_ch2.setData(
-                self.mca_x_axis / self.num_bins * max_charge_ch2, ch2_log
+                self.mca_x_axis / self.counts_full_scale * max_charge_ch2, ch2_log
             )
+        elif self.setting_tab.show_type == self.setting_tab.VOLTAGE:
+            voltage_x = (
+                self.mca_x_axis / self.counts_full_scale * self.setting_tab.adc_range
+            )
+            self.mca_item_ch1.setData(voltage_x, ch1_log)
+            self.mca_item_ch2.setData(voltage_x, ch2_log)
 
     def show_time(self):
         if self.time_chart_type == "all":
@@ -1620,9 +1722,18 @@ class RunningWindow(QWidget):
 
         end = self.data_model.ptr
 
+        # Voltage mode adds the range's minimum to the ABSOLUTE start/stop
+        # samples (the drivers' counts are zero-based from the range
+        # minimum — e.g. 0 counts = −5 V on the NI ±5 V range); the
+        # DIFFERENCE curve stays offset-free (it cancels).
+        offset = 0.0
         if self.setting_tab.show_type == self.setting_tab.CHANNEL:
             factor_ch1 = 1
             factor_ch2 = 1
+        elif self.setting_tab.show_type == self.setting_tab.VOLTAGE:
+            factor_ch1 = self.setting_tab.adc_range / self.counts_full_scale
+            factor_ch2 = factor_ch1
+            offset = self.setting_tab.adc_min_volts
         elif self.setting_tab.show_type == self.setting_tab.CHARGE:
             max_charge_ch1 = (
                 self.session.capacitance_pf_ch1 * self.setting_tab.adc_range
@@ -1630,8 +1741,8 @@ class RunningWindow(QWidget):
             max_charge_ch2 = (
                 self.session.capacitance_pf_ch2 * self.setting_tab.adc_range
             )
-            factor_ch1 = max_charge_ch1 / self.num_bins
-            factor_ch2 = max_charge_ch2 / self.num_bins
+            factor_ch1 = max_charge_ch1 / self.counts_full_scale
+            factor_ch2 = max_charge_ch2 / self.counts_full_scale
 
         x = np.arange(start=start, stop=end)
         self.line_item_ch1.setData(
@@ -1641,103 +1752,21 @@ class RunningWindow(QWidget):
             x=x, y=self.data_model.filtered_data[start:end, 1] * factor_ch2
         )
 
-        self.show_overflow_marker(start=start, stop=end)
-
         if self.session.debug_mode:
-            filtered_ch1 = self.data_model.filtered_data[start:end, 0]
-            filtered_ch2 = self.data_model.filtered_data[start:end, 1]
-
-            start_y1 = np.where(
-                np.isnan(filtered_ch1),
-                np.nan,
-                self.data_model.start_data[start:end, 0] * factor_ch1,
-            )
-            stop_y1 = np.where(
-                np.isnan(filtered_ch1),
-                np.nan,
-                self.data_model.stop_data[start:end, 0] * factor_ch1,
-            )
-            start_y2 = np.where(
-                np.isnan(filtered_ch2),
-                np.nan,
-                self.data_model.start_data[start:end, 1] * factor_ch2,
-            )
-            stop_y2 = np.where(
-                np.isnan(filtered_ch2),
-                np.nan,
-                self.data_model.stop_data[start:end, 1] * factor_ch2,
-            )
+            # Raw start/stop values, always shown: they stay visible even
+            # when the DIFFERENCE was invalidated (negative stop-start or
+            # ROI-excluded) — only a true ADC overflow (sentinel sample)
+            # leaves a gap, and those positions additionally carry the
+            # "Errors" marker at the top of the plot.
+            start_y1 = offset + self.data_model.start_data[start:end, 0] * factor_ch1
+            stop_y1 = offset + self.data_model.stop_data[start:end, 0] * factor_ch1
+            start_y2 = offset + self.data_model.start_data[start:end, 1] * factor_ch2
+            stop_y2 = offset + self.data_model.stop_data[start:end, 1] * factor_ch2
 
             self.start_line_item_ch1.setData(x=x, y=start_y1)
             self.stop_line_item_ch1.setData(x=x, y=stop_y1)
             self.start_line_item_ch2.setData(x=x, y=start_y2)
             self.stop_line_item_ch2.setData(x=x, y=stop_y2)
-
-    def show_overflow_marker(self, y_marker=None, start: int = 0, stop: int = 0):
-        if y_marker is None:
-            y_marker = self.num_bins
-        if self.setting_tab.show_type == self.setting_tab.CHARGE:
-            max_charge = (
-                max(
-                    [
-                        self.session.capacitance_pf_ch1,
-                        self.session.capacitance_pf_ch2,
-                    ]
-                )
-                * self.setting_tab.adc_range
-            )
-            y_marker = y_marker / self.num_bins * max_charge
-
-        x_nan_ch1 = start + np.where(np.isnan(self.data_model.data[start:stop, 0]))[0]
-        y_nan_ch1 = np.full(x_nan_ch1.shape, y_marker, dtype=float)
-        x_nan_ch2 = start + np.where(np.isnan(self.data_model.data[start:stop, 1]))[0]
-        y_nan_ch2 = np.full(x_nan_ch2.shape, y_marker, dtype=float)
-
-        if x_nan_ch1.size == 0 and self.nan_marker_item_ch1 is not None:
-            self.plot_widget.removeItem(self.nan_marker_item_ch1)
-            self.nan_marker_item_ch1 = None
-
-        elif x_nan_ch1.size > 0:
-            if self.nan_marker_item_ch1 is None:
-                self.nan_marker_item_ch1 = self.plot_widget.plot(
-                    x_nan_ch1,
-                    y_nan_ch1,
-                    pen=None,
-                    symbol="o",
-                    symbolPen="k",
-                    symbolBrush="c",
-                    symbolSize=10,
-                    name="Errors CH 1",
-                )
-            else:
-                self.nan_marker_item_ch1.setData(x_nan_ch1, y_nan_ch1)
-
-        if x_nan_ch2.size == 0 and self.nan_marker_item_ch2 is not None:
-            self.plot_widget.removeItem(self.nan_marker_item_ch2)
-            self.nan_marker_item_ch2 = None
-
-        elif x_nan_ch2.size > 0:
-            if self.nan_marker_item_ch2 is None:
-                self.nan_marker_item_ch2 = self.plot_widget.plot(
-                    x_nan_ch2,
-                    y_nan_ch2,
-                    pen=None,
-                    symbol="x",
-                    symbolPen="k",
-                    symbolBrush="r",
-                    symbolSize=10,
-                    name="Errors CH 2",
-                )
-            else:
-                self.nan_marker_item_ch2.setData(x_nan_ch2, y_nan_ch2)
-
-    def remove_overflow_marker(self):
-        if self.nan_marker_item_ch1 is not None:
-            self.plot_widget.removeItem(self.nan_marker_item_ch1)
-            self.nan_marker_item_ch1 = None
-        if self.nan_marker_item_ch2 is not None:
-            self.plot_widget.removeItem(self.nan_marker_item_ch2)
-            self.nan_marker_item_ch2 = None
 
     def show_points_time_plt(self):
         if self.view_plt_points.isChecked():
@@ -1787,17 +1816,17 @@ class RunningWindow(QWidget):
 
         max_charge = self.session.capacitance_pf_ch1 * self.setting_tab.adc_range
         set_item(0, 1, round(self.data_model.mean_value_ch1, 2))
-        set_item(0, 2, round(self.data_model.mean_value_ch1 / self.num_bins * max_charge, 2))
+        set_item(0, 2, round(self.data_model.mean_value_ch1 / self.counts_full_scale * max_charge, 2))
         set_item(0, 3, round(self.data_model.variance_ch1, 4))
         set_item(
-            0, 4, round(self.data_model.variance_ch1 * (max_charge / self.num_bins) ** 2, 4)
+            0, 4, round(self.data_model.variance_ch1 * (max_charge / self.counts_full_scale) ** 2, 4)
         )
         set_item(0, 5, round(np.sqrt(self.data_model.variance_ch1), 4))
         set_item(
             0,
             6,
             round(
-                np.sqrt(self.data_model.variance_ch1 * (max_charge / self.num_bins) ** 2), 4
+                np.sqrt(self.data_model.variance_ch1 * (max_charge / self.counts_full_scale) ** 2), 4
             ),
         )
         set_item(0, 7, round(covariance_ch1, 4))
@@ -1806,17 +1835,17 @@ class RunningWindow(QWidget):
 
         max_charge = self.session.capacitance_pf_ch2 * self.setting_tab.adc_range
         set_item(1, 1, round(self.data_model.mean_value_ch2, 2))
-        set_item(1, 2, round(self.data_model.mean_value_ch2 / self.num_bins * max_charge, 2))
+        set_item(1, 2, round(self.data_model.mean_value_ch2 / self.counts_full_scale * max_charge, 2))
         set_item(1, 3, round(self.data_model.variance_ch2, 4))
         set_item(
-            1, 4, round(self.data_model.variance_ch2 * (max_charge / self.num_bins) ** 2, 4)
+            1, 4, round(self.data_model.variance_ch2 * (max_charge / self.counts_full_scale) ** 2, 4)
         )
         set_item(1, 5, round(np.sqrt(self.data_model.variance_ch2), 4))
         set_item(
             1,
             6,
             round(
-                np.sqrt(self.data_model.variance_ch2 * (max_charge / self.num_bins) ** 2), 4
+                np.sqrt(self.data_model.variance_ch2 * (max_charge / self.counts_full_scale) ** 2), 4
             ),
         )
         set_item(1, 7, round(covariance_ch2, 4))
@@ -2277,6 +2306,16 @@ class RunningWindow(QWidget):
     def on_edit_info(self):
         dialog = InfoDialog(self.session, self.hardware_manager, self)
         dialog.exec()
+        try:
+            # the gain (total capacitance) edited in the dialog feeds the
+            # counts→charge conversion of the results table
+            self.refresh_result_ui()
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).error(
+                "Error refreshing the results after editing the info"
+            )
 
     def update_after_load(self, elapsed_time: float):
         self.fill_result_table()
@@ -2761,9 +2800,15 @@ class RunSettingTab(QWidget):
     channel_roi_removed = pyqtSignal(object)
     CHARGE = "Charge"
     CHANNEL = "Channel"
+    VOLTAGE = "Voltage"
 
     show_type = CHANNEL
-    adc_range = 5
+    # Counts→volt/charge scaling context (B23): span (max − min) and minimum
+    # of the ADC input range APPLIED on the acquisition device — auto-synced
+    # from the session (Apply Configuration / loaded archive); the 0-5 V
+    # default remains the fallback for simulation and legacy files.
+    adc_range = 5.0
+    adc_min_volts = 0.0
     COV_DOUBLE = "Double"
     COV_SUCCESSIVE = "Successive"
     covariance_type = COV_SUCCESSIVE
@@ -2815,27 +2860,6 @@ class RunSettingTab(QWidget):
         # main_layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(main_layout)
 
-        # --- ADC Section ---
-        adc_group = QGroupBox("ADC Range [V]")
-        adc_layout = QHBoxLayout()
-
-        self.min_adc_line = QDoubleSpinBox()
-        self.min_adc_line.setRange(float("-inf"), float("inf"))
-        self.min_adc_line.setValue(0)
-        self.min_adc_line.valueChanged.connect(self.on_adc_range_change)
-
-        self.max_adc_line = QDoubleSpinBox()
-        self.max_adc_line.setRange(float("-inf"), float("inf"))
-        self.max_adc_line.setValue(5)
-        self.max_adc_line.valueChanged.connect(self.on_adc_range_change)
-
-        adc_layout.addWidget(self.min_adc_line)
-        adc_layout.addStretch(1)
-        adc_layout.addWidget(QLabel("to"))
-        adc_layout.addStretch(1)
-        adc_layout.addWidget(self.max_adc_line)
-        adc_group.setLayout(adc_layout)
-
         # --- Calibration Section ---
         calib_group = QGroupBox("Calibration")
         calib_layout = QVBoxLayout()
@@ -2853,7 +2877,7 @@ class RunSettingTab(QWidget):
         view_group = QGroupBox("Units")
         view_layout = QVBoxLayout()
         self.type_box = QComboBox()
-        self.type_box.addItems([self.CHANNEL, self.CHARGE])
+        self.type_box.addItems([self.CHANNEL, self.CHARGE, self.VOLTAGE])
         self.type_box.currentIndexChanged.connect(self.on_type_change)
         view_layout.addWidget(self.type_box)
         view_group.setLayout(view_layout)
@@ -2917,8 +2941,6 @@ class RunSettingTab(QWidget):
         content_layout = QVBoxLayout(content_widget)
         content_layout.setContentsMargins(0, 0, 5, 0)
 
-        content_layout.addWidget(adc_group)
-        content_layout.addSpacing(20)
         content_layout.addWidget(view_group)
         content_layout.addWidget(cov_group)
         content_layout.addWidget(time_roi_group)
@@ -2940,15 +2962,6 @@ class RunSettingTab(QWidget):
             self.covariance_type = self.COV_SUCCESSIVE
 
         self.update_signal.emit()
-
-    def on_adc_range_change(self):
-        mn, mx = self.min_adc_line.value(), self.max_adc_line.value()
-        if mn > mx:
-            self.min_adc_line.setValue(mx)
-        diff = mx - mn
-        if diff > 0:
-            self.adc_range = diff
-            self.update_signal.emit()
 
     def on_add_roi_press(self):
         roi = ROIWidget(self.session)

@@ -21,6 +21,21 @@ dist/
 *.swp
 .DS_Store
 
+.venv/
+
+uv.lock
+
+
+USB-6451 - *.pdf
+
+docs/PICO/firmware/
+docs/PICO/datasheet/
+
+docs/PIC/v2_2/
+docs/PIC/v2_2/
+
+AGENT.md
+
 # Pico firmware working copy (lives in its own repository; local only)
 raspberry_copy/
 

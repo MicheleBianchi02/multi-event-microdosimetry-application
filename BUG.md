@@ -67,13 +67,13 @@ Severity scale:
   driver), so the existing `_update_loop` error branch becomes reachable; on
   that path also finalize the ramp sink and close the temp CSV.
 
-### B23 — Running window's charge scaling uses a hardcoded 5 V default instead of the applied ADC input range *(reported 2026-09-27)*
+### B23 — Running window's charge scaling uses a hardcoded 5 V default instead of the applied ADC input range — **FIXED** *(reported 2026-09-27, fixed 2026-10-28)*
 - **Intended:** the ADC context is dynamic end-to-end (B6): the charge
   conversion `Q = C · ΔV` uses the input range actually applied during the
   run (known from `HardwareManager.get_adc_settings()` at Apply
   Configuration, and from `hardware_settings.adc.input_range_volts` when an
   archive is loaded).
-- **Current:** every charge conversion in the running window uses
+- **As found:** every charge conversion in the running window uses
   `setting_tab.adc_range` — a class attribute defaulting to 5
   (`views/running_window.py:2766`) bound to the editable "ADC Range [V]"
   spinboxes, which default to 0–5 V (`views/running_window.py:2822-2830`) and
@@ -85,10 +85,19 @@ Severity scale:
   the NI (default ±5 V, counts zero-based at −5 V) the span is wrong by 2×
   and the mean charge carries a C·5 pC offset. The user can type the correct
   values by hand, but nothing tells them the defaults are wrong.
-- **Fix direction:** initialize the spinboxes (or the conversion directly)
-  from `HardwareManager.get_adc_settings()` at Apply Configuration and from
-  the archive's `hardware_settings.adc.input_range_volts` at load, like
-  `adc_bits` already is (make the field read-only when the range is fixed).
+- **Fixed:** `SessionModel.adc_input_range` (+ `adc_input_range_changed`)
+  carries the applied range — set by the setup controller after
+  `set_input_range` (`get_adc_settings()`) and by the measurement controller
+  from a loaded archive's `hardware_settings.adc.input_range_volts` — and
+  the running window's scaling context (`adc_range` span + `adc_min_volts`)
+  follows it; the old editable "ADC Range [V]" spinboxes were removed
+  (their 0-5 V values remain the fallback for simulation/legacy files,
+  where no range is known). The per-count factor also became the exact
+  inverse of the drivers' conversion (`span / (2^bits − 1)` — one count
+  below the histogram bin count, matching the NI driver and the offline
+  `counts_to_pc_factor`), and Voltage mode adds the range minimum to the
+  absolute start/stop curves. Regression tests:
+  `tests/test_running_window_scaling.py`.
 
 ### B24 — NI stream not aligned to the integration-window grid (start ordering) — **FIXED** *(reported 2026-09-27)*
 - **Intended:** the first converted sample of a ramp/markers stream is the
@@ -424,6 +433,64 @@ Severity scale:
     transient host stall into a fatal overrun). Fixed in
     `MeasurementController.start_device` / `NIDAQmxAcquisition`
     (`input_buf_size` ≈ 5 s of stream, bounded; test_ni_driver.py).
+
+### B41 — UPDATE FILE fed the saved ZIP back in as its own data source — **FIXED** *(reported 2026-09-28)*
+- **Intended:** a re-save of a stopped measurement (the UPDATE FILE button
+  after a first save, or SAVE AS) rewrites the archive from the measurement
+  still held in memory; the raw data of a run must never depend on which
+  files a previous save happened to leave behind.
+- **Current (as found):** `handle_save_data` chose its raw-data source as
+  `session.file_path` whenever `_current_file` existed — but STOP never
+  cleared `_current_file`, and the first successful save repointed
+  `session.file_path` at the **ZIP**. Every subsequent save therefore called
+  `export_to_zip(temp_csv_path=<the ZIP>, zip_filepath=<the same ZIP>)`: the
+  ZIP was truncated on open, then read back as `data.csv` (binary garbage),
+  the export still reported success — and with the workspace
+  `.active_run.csv.tmp` deleted by the first save's cleanup, the run's raw
+  data was gone (HIGH by the scale above: silent data loss on the normal
+  campaign flow run → save → update). Two adjacent defects on the same
+  path: the re-saved `settings.json` dropped the `ramp` section (publishing
+  runs only once), silently unlinking the archive from its ramp folder; and
+  loading an archive after an earlier unsaved run left that run's temp CSV
+  as the source for saving the *loaded* measurement.
+- **Fixed (2026-09-29):** the run's online temp CSV is tracked explicitly
+  (`_online_csv_path`: set at start, reset at start and on archive load)
+  and used as the save source only while it exists and the online writer
+  stayed healthy; otherwise the CSV is rebuilt from `DataModel` memory (the
+  no-workspace path). `session.file_path` is never used as a data source.
+  The published ramp section is remembered (`_ramp_meta`) and re-linked by
+  later saves of the same run; the memory temp is cleaned up on the flag
+  that created it, not on `_current_file`.
+- Regression tests: `tests/test_save_update.py`
+  (`test_update_after_save_keeps_data_csv` — byte-equal `data.csv` across
+  the first save and UPDATE FILE, both failing on the pre-fix code with a
+  garbage second `data.csv`; `test_resave_keeps_the_published_ramp_section`).
+
+### B42 — The time chart's axis re-derived the sample period as int + reset — **FIXED** *(reported 2026-10-19)*
+- **Intended:** the time window's x axis shows the same times as the
+  archived `data.csv` timestamps (`index / sample_freq`), which use the
+  **applied** period the timing driver's mirror reports — reset + settle +
+  N·dt, including every driver/firmware dead time even when the reset time
+  is tiny.
+- **Current (as found):** `init_time_chart` set the bottom-axis scale to
+  `int_time + reset_time` — exact only in `internal` timing.  In
+  ramp/markers mode the real period differs (markers ≈ reset + 2·T_int;
+  with the PIO generator's 2·dt settle up to ≈ 4·T_int), so the displayed
+  times drifted linearly against the archived timestamps — with a small
+  reset the plot looked like "multiples of the integration time" while the
+  CSV was correct.  The mis-scaled axis also displaced the time-ROI
+  regions' on-screen second readouts (they are placed by `seconds ×
+  sample_freq`, i.e. the correct basis) and disagreed with the moving
+  window's seconds→points conversion.
+- **Fixed (2026-10-19):** new `SessionModel.sample_period_s` — 1 / the
+  applied sample frequency (the data.csv basis), falling back to the
+  applied period, then to int + reset for legacy sessions carrying
+  neither — used as the axis scale.  Internal mode is numerically
+  unchanged (its period IS int + reset).
+- Regression tests: `tests/test_time_axis.py` (the property's chain incl.
+  legacy fallbacks, and the axis scale through the real
+  `RunningWindow.init_time_chart` for markers-mode and internal-mode
+  timings; all fail on the pre-fix code).
 
 ---
 

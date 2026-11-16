@@ -4,12 +4,12 @@
         "pico_1": {
             "name": "Pico 2 \u2014 timing + gain",
             "driver": "pico_serial_v1",
-            "firmware_version": "2.0",
+            "firmware_version": "2.5",
             "connection": {
                 "type": "serial",
                 "baud_rate": 115200
             },
-            "note": "Firmware PICO2DAQ 2.1. Generates the timing (integration/reset, ramp triggers on GP15 -> CONV_START) and switches the capacitors. No port here: auto-connect opens /dev/atomiqa/pico_1 (udev rule).",
+            "note": "Firmware PICO2DAQ 2.5. Generates the timing (integration/reset, ramp triggers on GP15 -> CONV_START) and switches the capacitors. No port here: auto-connect opens /dev/atomiqa/pico_1 (udev rule).",
             "capabilities": {
                 "timing": {
                     "integration_time_us": {
@@ -45,10 +45,10 @@
         "ni_6451": {
             "name": "NI USB-6451 \u2014 acquisition",
             "driver": "ni_daqmx_v1",
-            "note": "20-bit, 1 MS/s/ch simultaneous. Clocked by CONV_START from the Pico (PFI0, rising edge). ch1 differential = AI0(+)/AI8(-); ch2 differential = AI1(+)/AI9(-). The 'device' field is the DAQmx device name.",
+            "note": "20-bit, 1 MS/s/ch simultaneous. Clocked by CONV_START from the Pico (PFI2 = screw terminal 28, D GND on 27; rising edge). Default terminals: ch1 differential = AI7(+)/AI15(-), ch2 differential = AI1(+)/AI9(-); per-channel override via channels.<ch>.adc_input (e.g. \"AI6\"). The 'device' field is the DAQmx device name.",
             "connection": {
                 "type": "daqmx",
-                "device": "NI6451"
+                "device": "Dev1"
             },
             "capabilities": {
                 "acquisition": {

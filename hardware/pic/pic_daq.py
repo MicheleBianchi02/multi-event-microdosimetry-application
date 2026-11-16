@@ -36,8 +36,11 @@ class PICSerialDAQ(IDataAcquisition, ITimingController, IGainController):
     ADC_BITS = 12
     SUPPORTS_RAMP_WHILE_ACQUIRING = True  # no ramp support at all
     HARDWARE_LIMITS = TimingCapability(
+        # TMR1U chains up to 256 timer periods: 2^24 ticks = 512 s
         integration_time_us=ParameterBounds(1, 512_000_000, 1),
-        reset_time_us=ParameterBounds(1, 512_000_000, 1),
+        # The reset phase spans a single timer period (no software
+        # prescaler on this phase, by design): 65536/32768 Hz = 2 s
+        reset_time_us=ParameterBounds(1, 2_000_000, 1),
         period_us=None,  # derived by the firmware: period = int + reset
         ramp_sampling=RampSamplingConfig(False),  # no ramp trigger support
     )

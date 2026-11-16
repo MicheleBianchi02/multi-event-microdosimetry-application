@@ -274,10 +274,15 @@ the FFT dialog so a rolling refresh cannot wipe it) → copy the four
 classic estimators into `data_model.result` → moving-average and FFT-plot
 computation via `AnalysisService` → `running_view.render_analysis(...)`.
 
-**SAVE** (`handle_save_data`): flush the online CSV (or write memory to a
-temp CSV when no workspace) → timestamps (`timestamp_end = start +
-ptr/f_sample`) → `n_bootstraps` mirrored from the calc rule → ramp files
-published *before* packaging (folder name goes into `settings.json`) →
+**SAVE** (`handle_save_data`): take the run's online temp CSV as the raw-data
+source while it exists (it doubles as the crash-recovery artifact), else
+rebuild the CSV from memory (no workspace, a mid-run write error, or a
+previous save already consumed the temp — UPDATE FILE re-saves work off
+memory; `session.file_path` is never the source, it is the ZIP after a
+save, B41) → timestamps (`timestamp_end = start + ptr/f_sample`) →
+`n_bootstraps` mirrored from the calc rule → ramp files published
+*before* packaging (folder name goes into `settings.json`; later saves of
+the same run re-link the published section) →
 `DataExporter.export_to_zip(...)` with the verbatim config/setup texts →
 on success delete all seven `.active_run.*` temps.
 
@@ -370,6 +375,43 @@ separate from `DataModel`.
   `recover_ramp_file` (truncates to the last whole window at the
   watermark, marks the header ABORTED; wired into the workspace recovery
   flow, §5.3).
+
+### 5.2b `LiveRampSink` (`services/live_ramp.py`)
+
+The third consumer of the ramp block stream, for spectral campaigns with
+long ramps (seconds/window) where recording every sample would fill the
+disk: ramps stream **through** memory — one window assembled per channel at
+a time — and only results are kept. Opened from the timing window's
+"Live Ramp Analysis…" button (enabled only with the timing applied in ramp
+mode; owned by `MeasurementController.open_live_ramp`, mutually exclusive
+with a normal run through `HardwareService.is_receiving`).
+
+- Same `_BlockSinkBase` producer side, overflow policy `"drop"` (a lost
+  window only slows the average; backpressure would overrun the NI
+  reader). Channels are processed **independently** — no cross-channel
+  pairing.
+- Per completed window: the latest sample vector is kept for the preview
+  (`latest_gen` guards the UI against copying a 10⁷-sample window per
+  redraw), and two results are accumulated:
+  - **FFT**: rfft of the user-selected segment `[t0, t1]` (the start
+    transient is discarded by moving `t0`), mean removed,
+    `ms = 2·(|X|/n′)²` power-averaged over windows — exactly the
+    `window_dbv_spectrum` / oscilloscope convention (DC and Nyquist lines
+    dropped at read time).
+  - **CDS**: single samples at chosen times `t_start` / `t_stop`,
+    difference `stop − start` appended to per-channel series (growable
+    float64 arrays — a python list would cost ~100 MB/hour of object
+    overhead at a 1 kHz window rate); the UI shows mean/std/variance/min/
+    max plus a histogram.
+- **Selection changes reset the accumulators** (`set_selection`): an
+    average is only meaningful when every window was analyzed the same
+    way; the Reset button calls the same `reset()` (the preview survives).
+- Stop/Start keeps the results (Pause semantics); the Export button
+    writes per-channel `_spectrum.csv` / `_cds.csv` with the full timing
+    header — nothing touches the workspace automatically.
+- Acquisition is the *normal* ramp path (`HardwareService.start_receiving`
+    with this sink), including the arm → 3 s → start contract; the Pico
+    and NI flow are untouched.
 
 ### 5.3 `ShiftService` (`services/shift_service.py`)
 
@@ -465,9 +507,9 @@ ch2_unc]` list.
   odd/even subsequences (pairs of consecutive samples); statistics on the
   even subsequence, covariance `cov = np.cov(odd, even, ddof=1)`;
   `ȳ_D = (var − cov)/mean`; `cov_mean_sq = cov/mean²` (feeds the
-  uncertainty propagation in the UI).
+  uncertainty propagation in the UI); `cov_var_ratio = cov/var`.
 - **`var_autocov`** (lag-1 autocovariance): `γ(1) = Σ(x_i−μ)(x_{i+1}−μ)/(n−1)`;
-  `ȳ_D = (var − γ(1))/mean`.
+  `ȳ_D = (var − γ(1))/mean`; `autocov_var_ratio = γ(1)/var`.
 - **`var_doublecov`** (cross-channel, two detectors): covariance between
   the two channels over pairwise-finite rows; same layout as `var_cov`
   (the `Covariance` slot carries the same value in both channel slots).
@@ -479,9 +521,19 @@ ch2_unc]` list.
   PSD over the frequency bins *kept* (the complement of the user's
   excluded bands, optionally clipped at the threshold),
   `Variance = Σ psd·df` over the whole spectrum, `Covariance = Variance −
-  floor·f_Nyquist` (everything non-white), `ȳ_D = floor·f_Nyquist/mean`;
-  uncertainties are 0 (future work); a diagnostics snapshot (floor,
-  peaks above threshold with their variances, kept-mask) accompanies it.
+  floor·f_Nyquist` (everything non-white), `ȳ_D = floor·f_Nyquist/mean`,
+  `cov_var_ratio = Covariance/Variance` (the non-white fraction) and `M`
+  (the kept floor bin count, archived next to `N` the sample count);
+  uncertainties — mean and variance via the circular block bootstrap
+  (`bootstrap_mean_var_uncertainties`, the same machinery as the other
+  estimators), `ȳ_D` and the white variance via the floor's chi-square
+  statistics `value·√(1/M)` with M the kept floor bins (each one-sided
+  bin carries two degrees of freedom and only the positive-frequency half
+  is summed; with no exclusions M = N/2 and the uncertainty equals the
+  variance method's √(2/N); first approximation: threshold clipping and
+  Welch's segment averaging are ignored), covariance and cov_var_ratio unknown → 0; a diagnostics
+  snapshot (floor, peaks above threshold with their variances,
+  kept-mask) accompanies it.
 
 **Uncertainties for the covariance methods** — circular block bootstrap
 via the `arch` package:
@@ -492,7 +544,7 @@ via the `arch` package:
 3. `get_cbb_indices` draws random-start wrap-around blocks (integer
    arithmetic instead of modulo) building `n_b × n` index matrices;
 4. the resampled statistic set {mean, var, cov (or γ(1)) , ȳ_D,
-   cov/mean²} is evaluated per resample;
+   cov/mean², cov/var} is evaluated per resample;
 5. uncertainties = `std(ddof=1)` of each bootstrap distribution;
 6. failures (NaN block length, exceptions) zero the whole section.
 
@@ -585,8 +637,10 @@ derives `/dev/atomiqa/<device_id>`.
 One paragraph each; the deep dives are the component documents:
 
 - `PicoSerialDAQ` — `pico_serial_v1` — PICO2DAQ 2.x over USB CDC; exact
-  quantization mirror (150 MHz floors; ramp: generator auto-selection at
-  dt = 100 µs, PIO raw-count programming via `O`, one-time `Q`
+  quantization mirror (150 MHz floors; ramp: reset = 5 µs selects the
+  fixed-clock generator — zero jitter, any dt — else the dt-scaled PIO up
+  to dt = 100 µs and the software generator above; raw-count programming
+  via `F`/`O`, one-time `Q`
   verification), identity handshake as liveness gate, 4-byte-word stream
   with marker handshake and byte-realign recovery, no-op
   mode/channels/arm. → [PICO/FIRMWARE_AND_DRIVER.md](PICO/FIRMWARE_AND_DRIVER.md)
@@ -596,7 +650,7 @@ One paragraph each; the deep dives are the component documents:
   (per mode × channels), mode-dependent 8/4/2-byte frame parser.
   → [PIC/FIRMWARE_AND_DRIVER.md](PIC/FIRMWARE_AND_DRIVER.md)
 - `NIDAQmxAcquisition` — `ni_daqmx_v1` — USB-6451, external CONV_START
-  sample clock on PFI0, fixed terminal table keyed by termination,
+  sample clock on PFI2, fixed terminal table keyed by termination,
   volts→uint32 normalization, arm-before-timing-start contract, drain-
   before-stop. → [NI/DRIVER.md](NI/DRIVER.md)
 - `DummyAcquisition` — `dummy_v1` — virtual acquisition for bench tests
@@ -667,6 +721,7 @@ an invalid file. Full user-facing reference: [HARDWARE_CONFIG.md](../HARDWARE_CO
 | simulation | `HardwareService` | synthetic tuples/blocks at `rate` |
 | `ramp-storage-writer` | `RampStorageService` | queue → file writes + window extraction + pairs callback |
 | `ramp-pair-extractor` | `RampPairExtractorService` | markers-mode in-memory windowing |
+| `live-ramp-sink` | `LiveRampSink` | results-only mode: window assembly → FFT/CDS accumulation |
 | bootstrap pool | `calculate_results` | `ThreadPoolExecutor(cpu_count)`, GIL released in numpy |
 
 **Handoff invariants**

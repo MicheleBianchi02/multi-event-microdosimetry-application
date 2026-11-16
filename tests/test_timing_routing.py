@@ -37,6 +37,38 @@ class StubTiming:
 
         return ActualTiming(int_us, reset_us, int_us + reset_us, 1e6 / (int_us + reset_us))
 
+    transient_test_supported = True
+
+    def configure_transient_reset_test(self, int_us, reset_us):
+        self.calls.append(("transreset", int_us, reset_us))
+        return True
+
+    def calculate_transient_reset_timing(self, int_us, reset_us):
+        from hardware.interfaces import ActualTiming
+
+        if int_us < 1.0:
+            raise ValueError("pulsed reset phase below the transient minimum")
+        period = int_us + reset_us
+        return ActualTiming(
+            int_us, reset_us, period, 1e6 / period,
+            samples_per_window=int(int_us), ramp_dt_eff_us=1.0,
+        )
+
+    def configure_transient_test(self, int_us, reset_us):
+        self.calls.append(("transient", int_us, reset_us))
+        return True
+
+    def calculate_transient_timing(self, int_us, reset_us):
+        from hardware.interfaces import ActualTiming
+
+        if reset_us < 1.0:
+            raise ValueError("reset below the transient test minimum")
+        period = int_us + reset_us + 0.1
+        return ActualTiming(
+            int_us, reset_us, period, 1e6 / period,
+            samples_per_window=int(int_us) + 1, ramp_dt_eff_us=1.0,
+        )
+
 
 class StubAcquisition:
     """A distinct device holding the acquisition role (e.g. the NI)."""
@@ -110,9 +142,12 @@ def test_marker_degenerate_ramp_gives_two_pulses():
 
     d = PicoSerialDAQ()
     actual = d.calculate_ramp_timing(30.0, 30.0, 10.0)
-    assert actual.int_time_us == pytest.approx(30.0)  # one interval, 2 edges
-    # reset quantizes to the dt/10 tick (3 us at dt=30): 10 -> 9
-    assert actual.reset_time_us == pytest.approx(9.0)
+    # one interval, 2 edges; the divider rounds one step up (dt strictly
+    # > requested), so the interval spans dt_eff, not exactly 30 us
+    assert actual.samples_per_window == 2
+    assert actual.int_time_us == pytest.approx(actual.ramp_dt_eff_us)
+    # reset quantizes to the dt/10 tick (dt_eff/10 at dt=30): 10 -> 3 ticks
+    assert actual.reset_time_us == pytest.approx(3 * actual.ramp_dt_eff_us / 10)
 
 
 def test_preview_rejection_is_raised_not_swallowed():
@@ -182,9 +217,72 @@ def test_preview_carries_the_applied_window_geometry():
     actual, mode = manager.preview_timing(True, 7.31, 100.0066, 50.0)
     assert mode == "ramp"
     assert actual.samples_per_window == 14
-    assert actual.ramp_dt_eff_us == pytest.approx(7.309895833)
+    assert actual.ramp_dt_eff_us == pytest.approx(28071 / 3840.0)  # round-up
 
     # markers (no ramp requested on split hardware): exactly 2 edges/window
     actual, mode = manager.preview_timing(False, None, 99.9934, 5.0)
     assert mode == "markers"
     assert actual.samples_per_window == 2
+
+
+def test_transient_test_routes_to_the_test_generator():
+    """The transient flag bypasses the normal generator selection: the
+    driver's test mirror drives preview and configure, and the mode is
+    'ramp' downstream (window geometry from the mirror verbatim)."""
+    timing = StubTiming()
+    manager = make_manager(timing, StubAcquisition())
+    assert manager.transient_test_supported is True
+
+    actual, mode = manager.preview_timing(
+        True, 1.0, 100.0, 1.0, transient_test=True
+    )
+    assert mode == "ramp"
+    assert actual.samples_per_window == 101
+
+    assert manager.configure_timing(
+        True, 1.0, 100.0, 1.0, transient_test=True
+    ) is True
+    assert timing.calls[-1] == ("transient", 100.0, 1.0)
+
+    # validation runs through the test mirror too (raises with the reason)
+    with pytest.raises(ValueError, match="transient test minimum"):
+        manager.validate_timing(True, 1.0, 100.0, 0.5, transient_test=True)
+
+
+def test_transient_test_flag_off_keeps_normal_routing():
+    """Without the flag nothing changes: the ordinary generator selection
+    applies (regression guard for the new kwarg)."""
+    timing = StubTiming()
+    manager = make_manager(timing, timing)  # all-in-one: no-ramp routes internal
+    assert manager.configure_timing(False, 10.0, 100.0, 20.0) is True
+    assert timing.calls == [("noramp", 100.0, 20.0)]
+
+
+def test_transient_test_unsupported_driver_reports_false():
+    class NoTestTiming(StubTiming):
+        transient_test_supported = False
+
+        def calculate_transient_timing(self, int_us, reset_us):
+            raise NotImplementedError
+
+        def configure_transient_test(self, int_us, reset_us):
+            raise NotImplementedError
+
+    manager = make_manager(NoTestTiming(), StubAcquisition())
+    assert manager.transient_test_supported is False
+
+
+def test_transient_reset_routes_swapped():
+    """The reset-sampling flag routes preview/configure through the
+    swapped mirror; the app's int field becomes the pulsed phase."""
+    timing = StubTiming()
+    manager = make_manager(timing, StubAcquisition())
+    actual, mode = manager.preview_timing(True, 1.0, 3.0, 20000.0,
+                                          transient_reset=True)
+    assert mode == "ramp"
+    assert actual.samples_per_window == 3
+    assert manager.configure_timing(True, 1.0, 3.0, 20000.0,
+                                    transient_reset=True) is True
+    assert timing.calls[-1] == ("transreset", 3.0, 20000.0)
+    with pytest.raises(ValueError, match="transient minimum"):
+        manager.validate_timing(True, 1.0, 0.5, 20000.0, transient_reset=True)

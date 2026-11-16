@@ -35,10 +35,11 @@ grid a hardware guarantee rather than a software promise.
 | Timing | 10 ns resolution, 50 ppm of sample rate |
 | Overrange behaviour | readings **clamp** at ± full scale (no flag, no sentinel) |
 
-The bench uses **four different ADCs** so that any channel mix converts
-simultaneously at 1 MS/s each (never the 500 kS/s scan case): ch1
-differential = AI0(+)/AI8(−) → ADC 0, ch2 differential = AI1(+)/AI9(−) →
-ADC 1, ch1 single-ended = AI2 → ADC 2, ch2 single-ended = AI3 → ADC 3.
+Every terminal carries its own ADC, so any mix of distinct terminals
+converts simultaneously at 1 MS/s each (never the 500 kS/s scan case). The
+bench defaults: ch1 differential = AI7(+)/AI15(−) → ADC 7, ch2
+differential = AI1(+)/AI9(−) → ADC 1, ch1 single-ended = AI0 → ADC 0, ch2
+single-ended = AI3 → ADC 3 (§2.2 for the per-channel `adc_input` override).
 
 ### 1.2 Clocking — the property the whole design hinges on
 
@@ -50,8 +51,8 @@ resolution / 50 ppm accuracy of the digitizer only stamping the edges.
 
 ATOMIQA exploits this: the Pico's CONV_START output (edges at the
 integration start and end, or the full ramp-sampling train at spacing dt —
-never any edge during reset) drives **PFI0** (screw terminal 25 on the
-AO/DIO connector). Therefore
+never any edge during reset) drives **PFI2** (screw terminal 28 on the
+AO/DIO connector; D GND on terminal 27 for the ground return). Therefore
 
 > **N = T_int/dt + 1 samples per integration window** — the same number the
 > Pico firmware programs into its generators and the ramp-storage window
@@ -72,7 +73,7 @@ This matters because the Pico's CONV_START is a 3.3 V signal: in the 5 V
 family the guaranteed input-high threshold is **3.66 V** — above what the
 Pico can deliver, so the clock would be *electrically out of spec* (the
 guaranteed-VIH threshold, not the typical behaviour, is the problem). The
-driver therefore switches the PFI0 port's family to **3.3 V** (guaranteed
+driver therefore switches the digital port's family to **3.3 V** (guaranteed
 V_IH 2.0 V) at every connect, before anything is armed.
 
 Power-up state of the digital lines: high-impedance inputs with weak
@@ -97,7 +98,7 @@ before the timeout expired") — under an external clock this is the normal
 
 - Registry code `ni_daqmx_v1`; capability **acquisition only**; connection
   type `daqmx` — the config names the card as NI-DAQmx sees it
-  (`"connection": {"type": "daqmx", "device": "NI6451"}`), there is no
+  (`"connection": {"type": "daqmx", "device": "Dev1"}`), there is no
   serial port.
 - The `nidaqmx` Python package (on top of the NI-DAQmx runtime) is
   imported **lazily** inside `connect()`/`start_measurement()`: machines
@@ -113,36 +114,55 @@ INPUT_RANGES = (±10, ±5, ±2.5, ±0.2 V)     # default selected: ±5 V
 MAX_CHANNELS = 2            # exposed by this app (physical: 8 diff / 16 SE)
 MAX_RATE_HZ  = 1_000_000    # per channel — the manager gates ramp dt ≥ 1 µs
 CHANNEL_TERMINATIONS = ("differential", "rse")
-CHANNEL_TERMINALS = {                       # the fixed bench wiring:
-    ("ch1", "differential"): "ai0",         #   AI0 (+) / AI8 (−)
+CHANNEL_TERMINALS = {                       # the bench-default wiring:
+    ("ch1", "differential"): "ai7",         #   AI7 (+) / AI15 (−)
     ("ch2", "differential"): "ai1",         #   AI1 (+) / AI9 (−)
-    ("ch1", "rse"): "ai2",
+    ("ch1", "rse"): "ai0",  # bench: test signal lands on AI0
     ("ch2", "rse"): "ai3",
-}                                           # four different ADCs → simultaneous
-CONV_START_TERMINAL = "PFI0", rising edge, logic family THREE_POINT_THREE_V
+}                                           # one ADC per terminal → simultaneous
+MAX_AI_TERMINAL = 15          # AI0..AI15; RSE legal on any terminal
+MAX_DIFF_POSITIVE_TERMINAL = 7  # DIFF measures a pair AI<n>(+)/AI<n+8>(−)
+CONV_START_TERMINAL = "PFI2" (terminal 28), rising edge,
+                logic family THREE_POINT_THREE_V
+                # the family is set on port0 (which owns every PFI/P0 line):
+                # Dig.PortLogicFamily is a port attribute — "PFI2" is a
+                # routing terminal name, not a physical channel (DAQmx -200170)
 ```
 
-The config selects per channel **only the termination** (`differential` or
-`rse`); the physical terminals behind each choice are fixed hardware facts
-hardcoded here — change the cabling, change this table. The registry
-descriptor publishes `MAX_RATE_HZ` so `Apply Configuration` rejects a ramp
-dt whose 1/dt would exceed 1 MS/s before anything reaches the hardware.
+The config selects per channel the **termination** (`differential` or
+`rse`) and may override the physical terminal via the channel's
+`adc_input` (e.g. `"AI6"`, case-insensitive): without an override the
+bench defaults in the table above apply — change the cabling, change the
+table. A differential override must name the *positive* terminal of a pair
+(AI0–AI7; DAQmx implies the AI\<n+8\> negative), an RSE override may name
+any of AI0–AI15, and two channels may never resolve to the same terminal.
+The registry descriptor publishes `MAX_RATE_HZ` so `Apply Configuration`
+rejects a ramp dt whose 1/dt would exceed 1 MS/s before anything reaches
+the hardware, and `validate_channel_plan` (below) so an unwirable plan
+fails the config load.
 
 ### 2.3 `connect()` — enumeration, self-test, logic family
 
 1. Enumerate `System.local().devices`; the configured device name must
    exist (a missing card lists the present names in the log).
 2. `self_test_device()` — the card's own health check.
-3. Set the **PFI0 port logic family to 3.3 V** through the physical
-   channel property (§1.3). Failure of any step is a failed connect.
+3. Set the **digital logic family to 3.3 V** on **port0** — the port
+   owning the clock line — through the physical channel property (§1.3;
+   the attribute is a port property, and `PFI2` is not a valid physical
+   channel name). Failure of any step is a failed connect.
 
 ### 2.4 Channel plan and input range
 
-- `configure_channels([(ch_id, termination), …])` — called by the
+- `configure_channels([(ch_id, termination[, adc_input]), …])` — called by the
   `HardwareManager` at config-load time with the config's active channels
-  (missing termination defaults to `differential`). Each pair is mapped
-  through the fixed terminal table; unknown pairs or a terminal used twice
-  are rejected. The plan is stored for `start_measurement`.
+  (missing termination defaults to `differential`). Each entry is mapped to
+  its DAQmx terminal — the `adc_input` override when given, else the bench
+  default from the terminal table; unknown pairs, invalid terminals and a
+  terminal used twice are rejected. The plan and its resolved terminals are
+  stored for `start_measurement`. The same rules run at config **load**
+  through the registry hook `validate_channel_plan(plan) -> [errors]`, so a
+  typo like `"AI16"` fails the load with an error naming
+  `channels.<ch>.adc_input` instead of the measurement start.
 - `set_input_range(min, max)` accepts **only** the four exact USB-6451
   ranges (compared as voltage pairs) and defaults to ±5 V; anything else is
   rejected rather than approximated — a mislabeled range would corrupt
@@ -161,7 +181,7 @@ channel plan must exist. Then:
 1. Build one `nidaqmx.Task`; for each planned channel add a voltage
    channel on its fixed terminal with the mapped terminal configuration
    (`DIFF`/`RSE`) and the applied min/max.
-2. `cfg_samp_clk_timing(rate=expected_rate, source="/<device>/PFI0",
+2. `cfg_samp_clk_timing(rate=expected_rate, source="/<device>/PFI2",
    active_edge=RISING, sample_mode=CONTINUOUS)` — every conversion on a
    rising CONV_START edge. The `rate` argument is only the *expected* rate
    (from the session: dt for ramp mode, 1/T_int for markers mode) used for
@@ -223,12 +243,12 @@ sampling, `markers` on split hardware with a trigger-capable timing device,
 ### 2.8 End-to-end sequence for a split measurement
 
 ```
-connect()                       enumerate, self-test, PFI0 family → 3.3 V
+connect()                       enumerate, self-test, port0 family → 3.3 V
 configure_channels(plan)        done by the manager at config load
 set_input_range(±5 V)           one of the four exact ranges
 configure_timing(...)           goes to the TIMING device (the Pico) — the
                                 6451 receives no configuration commands
-start_measurement(..., sink)    build task, cfg_samp_clk_timing(PFI0),
+start_measurement(..., sink)    build task, cfg_samp_clk_timing(PFI2),
                                 task.start()   ← armed, waiting for edges
   (only now does the manager send 'S' to the timing device)
   …reader converts edge-clockied blocks into the sink…

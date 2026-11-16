@@ -10,7 +10,7 @@
         "capabilities": {
             "timing": {
                 "integration_time_us": {"min": 1, "max": 512000000, "step": 1},
-                "reset_time_us": {"min": 1, "max": 512000000, "step": 1},
+                "reset_time_us": {"min": 1, "max": 2000000, "step": 1},
                 "period_us": null,
                 "ramp_sampling": {
                     "supported": false

@@ -142,8 +142,9 @@ extra full period adds 2 s). The relative error reaches ≈ +500 % just above
    declared envelope to integration times ≤ 2 s: the shipped component
    (`hardware_library/device_pic.json`) and the driver's
    `HARDWARE_LIMITS` currently declare 512 s, which is the region where
-   the bug lives. (Note: the reset envelope should be tightened to 2 s
-   anyway — [FIRMWARE_AND_DRIVER.md §2.2](FIRMWARE_AND_DRIVER.md).)
+   the bug lives. (The reset envelope has since been tightened to its 2 s
+   design ceiling — see [FIRMWARE_AND_DRIVER.md
+   §2.2](FIRMWARE_AND_DRIVER.md).)
 
 ## 8. Reproducing
 

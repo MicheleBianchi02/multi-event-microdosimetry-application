@@ -11,12 +11,18 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy",
     "pandas",
+    "scipy",
     "PyQt6",
     "PyQt6-Charts",
     "pyqtgraph",
     "pyserial",
     "arch",
     "statsmodels",
+    # NI USB-6451 acquisition (ni_daqmx_v1); the Python wrapper only —
+    # the NI-DAQmx runtime is installed separately on the measurement PC.
+    # >=1.0: the driver relies on the 1.x read API (read_many_sample
+    # returning the sample count, samps_per_chan_read on timeout errors).
+    "nidaqmx>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -28,3 +34,14 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# The app runs from the repository root (python app.py); it is never
+# installed as a package, so uv only manages the dependencies.
+[tool.uv]
+package = false
+
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["controllers*", "core*", "data*", "hardware*", "hardware_library*", "models*", "services*", "views*"]
+exclude = ["raspberry_copy*", "tests*", "tools*", "docs*", "examples*"]

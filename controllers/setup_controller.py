@@ -196,7 +196,8 @@ class SetupController(QObject):
 
     def on_timing_calculation_requested(
         self, int_time_s: float, reset_time_s: float, period_s: float = None,
-        ramp_dt_us: float = None,
+        ramp_dt_us: float = None, transient_test: bool = False,
+        transient_reset: bool = False,
     ):
         hw_mgr = self.hardware.hardware_manager
         if not hw_mgr.timing:
@@ -216,6 +217,8 @@ class SetupController(QObject):
                 int_time_us=int_time_s * 1e6,
                 reset_time_us=reset_time_s * 1e6,
                 period_us=period_us,
+                transient_test=transient_test,
+                transient_reset=transient_reset,
             )
         except ValueError as exc:
             # The driver's mirror rejected the request (e.g. markers mode
@@ -273,6 +276,8 @@ class SetupController(QObject):
         period_us = timer_params.get("period_us")
         sample_ramp = bool(timer_params.get("sample_ramp", False))
         ramp_dt_us = timer_params.get("ramp_dt_us", 10.0)
+        transient_test = bool(timer_params.get("transient_test", False))
+        transient_reset = bool(timer_params.get("transient_reset", False))
         if sample_ramp and not hw_mgr.can_ramp_while_acquiring:
             logger.error(
                 "Ramp sampling rejected: the timing device cannot generate "
@@ -300,6 +305,8 @@ class SetupController(QObject):
             timer_params["int_time_us"],
             timer_params["reset_time_us"],
             period_us=period_us,
+            transient_test=transient_test,
+            transient_reset=transient_reset,
         )
         if not success:
             logger.error("Timing configuration rejected by the timing device")
@@ -314,7 +321,8 @@ class SetupController(QObject):
             actual, mode = hw_mgr.preview_timing(
                 sample_ramp, ramp_dt_us,
                 timer_params["int_time_us"], timer_params["reset_time_us"],
-                period_us=period_us,
+                period_us=period_us, transient_test=transient_test,
+                transient_reset=transient_reset,
             )
             if actual is not None:
                 self._refresh_session_timing(actual, mode)
@@ -347,6 +355,11 @@ class SetupController(QObject):
         adc = hw_mgr.get_adc_settings()
         if adc.get("bits"):
             self.session.adc_bits = int(adc["bits"])
+        # The input range APPLIED on the device (B23): the running window's
+        # volt/charge scaling must follow it, not its 0-5 V spinbox default.
+        rng = adc.get("input_range_volts") or {}
+        if "min_volts" in rng and "max_volts" in rng:
+            self.session.adc_input_range = (rng["min_volts"], rng["max_volts"])
 
         return True
 

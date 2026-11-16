@@ -5,10 +5,10 @@
     "data": {
         "name": "NI USB-6451",
         "driver": "ni_daqmx_v1",
-        "note": "20-bit simultaneous digitizer, 1 MS/s per channel, clocked by the external CONV_START signal from the timing device (PFI0, rising edge, 3.3 V). Fixed input terminals (hardcoded in the driver): ch1 differential = AI0(+)/AI8(-), ch2 differential = AI1(+)/AI9(-), ch1 single-ended = AI2, ch2 single-ended = AI3; the config selects only the channel 'termination'. Out-of-range readings clamp (railing at full scale = overflow). 'device' is the DAQmx device name — rename the card in the DAQmx driver stack to match, not the file.",
+        "note": "20-bit simultaneous digitizer, 1 MS/s per channel, clocked by the external CONV_START signal from the timing device (PFI2 = screw terminal 28, D GND on 27; rising edge, 3.3 V). Default input terminals: ch1 differential = AI7(+)/AI15(-), ch2 differential = AI1(+)/AI9(-), ch1 single-ended = AI0, ch2 single-ended = AI3; the config selects the channel 'termination' and may override the terminal per channel via 'adc_input' (e.g. \"AI6\"; rse: AI0..AI15, differential: positive of the AI<n>/AI<n+8> pair = AI0..AI7). Out-of-range readings clamp (railing at full scale = overflow). 'device' is the DAQmx device name and must match the name the card carries in the DAQmx driver stack on the acquisition PC (a fresh NI-DAQmx install names it 'Dev1').",
         "connection": {
             "type": "daqmx",
-            "device": "NI6451"
+            "device": "Dev1"
         },
         "capabilities": {
             "acquisition": {

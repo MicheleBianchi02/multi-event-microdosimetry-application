@@ -1,0 +1,11 @@
+{
+    "kind": "circuit",
+    "suggested_id": "ATOMIQA_1",
+    "data": {
+        "name": "ATOMIQA_1",
+        "fixed_capacitance_pF": 100.0,
+        "switchable_capacitors": [],
+        "model": "ATOMIQA_1_R1.1#11",
+        "note": "Gated integrator svillupato dai romani."
+    }
+}

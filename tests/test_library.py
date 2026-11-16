@@ -32,6 +32,19 @@ def test_all_shipped_fragments_are_valid():
     ]
 
 
+def test_pic_fragment_declares_the_2s_reset_ceiling():
+    """The PIC firmware generates the reset phase with a single timer period
+    (max 2 s, no TMR1U prescaler — unlike the integration path's 512 s): the
+    shipped fragment must not re-declare the old wide envelope, or configs
+    assembled from it would refuse to load."""
+    from hardware.pic.pic_daq import PICSerialDAQ
+
+    fragment = em.load_fragment(os.path.join(LIBRARY_DIR, "device_pic.json"))
+    reset = fragment["data"]["capabilities"]["timing"]["reset_time_us"]
+    assert reset["max"] <= PICSerialDAQ.HARDWARE_LIMITS.reset_time_us.max
+    assert PICSerialDAQ.HARDWARE_LIMITS.reset_time_us.max == 2_000_000
+
+
 def test_saved_device_fragment_keeps_connection_and_reimports(tmp_path):
     """B18: 'Save as Component' keeps the connection block — it carries
     nothing machine-specific anymore (no port; the persistent name is

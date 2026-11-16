@@ -12,7 +12,7 @@ from hardware.config.schema import (
     VoltageRange,
 )
 
-# Mirrors the real PicoSerialDAQ (firmware PICO2DAQ 2.1, required): the
+# Mirrors the real PicoSerialDAQ (firmware PICO2DAQ 2.5, required): the
 # software generator's dt is bounded only by the general time range.
 PICO_DESCRIPTOR = DriverDescriptor(
     capabilities=frozenset({"timing", "gain", "acquisition"}),
@@ -31,7 +31,8 @@ PIC_DESCRIPTOR = DriverDescriptor(
     capabilities=frozenset({"timing", "gain", "acquisition"}),
     timing=TimingCapability(
         integration_time_us=ParameterBounds(1, 512_000_000, 1),
-        reset_time_us=ParameterBounds(1, 512_000_000, 1),
+        # the reset phase spans a single timer period (no TMR1U prescaler)
+        reset_time_us=ParameterBounds(1, 2_000_000, 1),
         period_us=None,
         ramp_sampling=RampSamplingConfig(False),
     ),

@@ -416,11 +416,55 @@ def test_configure_channels_maps_fixed_terminals():
     driver = NIDAQmxAcquisition()
     assert driver.configure_channels([("ch1", "differential"), ("ch2", "differential")])
     assert driver._channel_plan == [("ch1", "differential"), ("ch2", "differential")]
+    assert driver._channel_terminals == ["ai7", "ai1"]
     assert driver.configure_channels([("ch1", "rse"), ("ch2", "rse")])
 
     assert not driver.configure_channels([("ch1", "nrse")])       # not supported
     assert not driver.configure_channels([])                      # empty plan
     assert not driver.configure_channels([("ch3", "differential")])  # unknown channel
+
+
+def test_configure_channels_adc_input_overrides_terminal():
+    driver = NIDAQmxAcquisition()
+    assert driver.configure_channels([("ch1", "rse", "AI6")])
+    assert driver._channel_terminals == ["ai6"]
+
+    # case-insensitive, surrounding whitespace tolerated
+    assert driver.configure_channels([("ch1", "rse", " ai6 ")])
+    assert driver._channel_terminals == ["ai6"]
+
+    # differential override: positive terminal of the AI<n>/AI<n+8> pair
+    assert driver.configure_channels([("ch1", "differential", "AI5"), ("ch2", "rse")])
+    assert driver._channel_terminals == ["ai5", "ai3"]
+
+    # None (or absent third element) keeps the bench default
+    assert driver.configure_channels([("ch1", "rse", None)])
+    assert driver._channel_terminals == ["ai0"]
+
+
+def test_configure_channels_rejects_bad_adc_input():
+    driver = NIDAQmxAcquisition()
+    assert not driver.configure_channels([("ch1", "rse", "AI16")])   # no such input
+    assert not driver.configure_channels([("ch1", "rse", "gp26")])   # not a terminal
+    assert not driver.configure_channels([("ch1", "rse", "6")])      # 'ai' prefix required
+    assert not driver.configure_channels([("ch1", "differential", "AI8")])  # not a pair positive
+    # both channels resolving to the same terminal
+    assert not driver.configure_channels(
+        [("ch1", "rse", "AI6"), ("ch2", "rse", "ai6")])
+
+
+def test_validate_channel_plan_names_the_config_path():
+    errors = NIDAQmxAcquisition.validate_channel_plan([("ch1", "rse", "AI16")])
+    assert len(errors) == 1
+    assert "channels.ch1.adc_input" in errors[0]
+
+    errors = NIDAQmxAcquisition.validate_channel_plan(
+        [("ch1", "rse", "AI3"), ("ch2", "rse", "AI3")])
+    assert len(errors) == 1
+    assert "AI3" in errors[0] and "ch1" in errors[0] and "ch2" in errors[0]
+
+    assert NIDAQmxAcquisition.validate_channel_plan(
+        [("ch1", "rse", "AI6"), ("ch2", "differential", None)]) == []
 
 
 def test_set_input_range_accepts_only_device_ranges():
@@ -453,20 +497,32 @@ def test_start_configures_task_channels_and_external_clock(fake_nidaqmx):
 
     (task,) = FakeTask.all_tasks
     assert [c.physical_channel for c in task.ai_channels.added] == [
-        "NI6451/ai0", "NI6451/ai1"]
+        "NI6451/ai7", "NI6451/ai1"]
     from nidaqmx.constants import TerminalConfiguration
     assert [c.terminal_config for c in task.ai_channels.added] == [
         TerminalConfiguration.DIFF, TerminalConfiguration.DIFF]
     assert all(c.min_val == -5.0 and c.max_val == 5.0 for c in task.ai_channels.added)
 
     clock = task.timing.clock
-    assert clock["source"] == "/NI6451/PFI0"
+    assert clock["source"] == "/NI6451/PFI2"
     assert clock["active_edge"] == CONSTANTS.Edge.RISING
     assert clock["sample_mode"] == CONSTANTS.AcquisitionType.CONTINUOUS
     assert clock["rate"] == pytest.approx(1e6)  # 1/dt, for buffer sizing
 
     driver.stop_measurement()
     assert task.stopped and task.closed
+
+
+def test_start_uses_adc_input_override_terminal(fake_nidaqmx):
+    driver = make_driver(plan=(("ch1", "rse", "AI6"),))
+    sink = StubSink()
+    assert driver.start_measurement(make_session(), None, ramp_sink=sink)
+
+    (task,) = FakeTask.all_tasks
+    from nidaqmx.constants import TerminalConfiguration
+    assert [c.physical_channel for c in task.ai_channels.added] == ["NI6451/ai6"]
+    assert [c.terminal_config for c in task.ai_channels.added] == [TerminalConfiguration.RSE]
+    driver.stop_measurement()
 
 
 def test_task_is_armed_before_start_measurement_returns(fake_nidaqmx):
@@ -608,8 +664,23 @@ def test_single_channel_plan_streams_one_channel(fake_nidaqmx):
     driver.stop_measurement()
 
     (task,) = FakeTask.all_tasks
-    assert [c.physical_channel for c in task.ai_channels.added] == ["NI6451/ai2"]
+    assert [c.physical_channel for c in task.ai_channels.added] == ["NI6451/ai0"]
     assert {b[0] for b in sink.blocks} == {0}  # only ch1 -> sink channel 0
+
+
+def test_adc_input_plan_streams_samples(fake_nidaqmx):
+    """Regression: the reader thread must unpack 3-tuple plan entries
+    (channel_id, termination, adc_input) — an unpacking crash there kills
+    the stream with no samples and no surfaced error."""
+    driver = make_driver(plan=(("ch1", "rse", "AI6"),))
+    sink = StubSink()
+    block = driver._block_size(1e6)
+    FakeReader.script = [np.stack([np.full(block, 1.0)])]
+    assert driver.start_measurement(make_session(), None, ramp_sink=sink)
+    assert _wait_for(lambda: sink.total(0) == block)
+    driver.stop_measurement()
+    assert driver._error is False
+    assert {b[0] for b in sink.blocks} == {0}
 
 
 def test_mixed_terminations_allowed(fake_nidaqmx):
@@ -620,7 +691,7 @@ def test_mixed_terminations_allowed(fake_nidaqmx):
     driver.stop_measurement()
     (task,) = FakeTask.all_tasks
     assert [c.physical_channel for c in task.ai_channels.added] == [
-        "NI6451/ai0", "NI6451/ai3"]
+        "NI6451/ai7", "NI6451/ai3"]
 
 
 def test_read_error_flags_stop(fake_nidaqmx):
@@ -635,14 +706,16 @@ def test_read_error_flags_stop(fake_nidaqmx):
 
 # ------------------------------------------------- bug 3: logic family
 
-def test_connect_sets_33v_logic_family_on_pfi0(fake_nidaqmx):
+def test_connect_sets_33v_logic_family_on_port0(fake_nidaqmx):
     """The Pico's CONV_START is 3.3 V; the 6451's shared digital logic
     family defaults to 5 V (VIH >= 3.66 V — out of spec).  connect() must
-    set the family to 3.3 V on the clock's physical channel."""
+    set the family to 3.3 V on the digital port owning PFI0 (the
+    attribute is a port property; "PFI0" is not a valid physical
+    channel name — live finding on the real card, DAQmx -200170)."""
     driver = NIDAQmxAcquisition(device_name="NI6451")
     assert driver.connect() is True
     (chan,) = FakePhysicalChannel.instances
-    assert chan.name == "NI6451/PFI0"
+    assert chan.name == "NI6451/port0"
     assert chan.dig_port_logic_family == CONSTANTS.LogicFamily.THREE_POINT_THREE_V
 
 
@@ -818,7 +891,9 @@ def test_example_pico_ni_config_loads_and_wires_the_plan():
     manager.load_config(_example_path())
     driver = manager.acquisition
     assert isinstance(driver, NIDAQmxAcquisition)
-    assert driver._channel_plan == [("ch1", "differential"), ("ch2", "differential")]
+    assert driver._channel_plan == [
+        ("ch1", "differential", None), ("ch2", "differential", None)]
+    assert driver._channel_terminals == ["ai7", "ai1"]
     assert manager.acquisition_max_rate_hz == 1_000_000.0
 
 
@@ -842,6 +917,46 @@ def test_config_rejects_bad_termination(tmp_path):
     with pytest.raises(ConfigValidationError) as excinfo:
         load_hardware_config(_patch_example(tmp_path, mutate), registry_descriptors())
     assert any("termination" in e for e in excinfo.value.errors)
+
+
+def test_config_adc_input_flows_to_the_driver(tmp_path):
+    from hardware.core.hardware_manager import HardwareManager
+
+    def mutate(data):
+        data["channels"]["ch1"]["termination"] = "rse"
+        data["channels"]["ch1"]["adc_input"] = "AI6"
+
+    manager = HardwareManager()
+    manager.load_config(_patch_example(tmp_path, mutate))
+    driver = manager.acquisition
+    assert driver._channel_plan[0] == ("ch1", "rse", "AI6")
+    assert driver._channel_terminals == ["ai6", "ai1"]
+
+
+def test_config_rejects_unwirirable_adc_input(tmp_path):
+    from hardware.registry import registry_descriptors
+    from hardware.config import load_hardware_config, ConfigValidationError
+
+    def mutate(data):
+        data["channels"]["ch1"]["adc_input"] = "AI16"
+
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load_hardware_config(_patch_example(tmp_path, mutate), registry_descriptors())
+    assert any("channels.ch1.adc_input" in e for e in excinfo.value.errors)
+
+
+def test_config_rejects_same_terminal_twice(tmp_path):
+    from hardware.registry import registry_descriptors
+    from hardware.config import load_hardware_config, ConfigValidationError
+
+    def mutate(data):
+        data["channels"]["ch1"]["termination"] = "rse"
+        data["channels"]["ch1"]["adc_input"] = "AI3"
+        data["channels"]["ch2"]["termination"] = "rse"  # default terminal: ai3
+
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load_hardware_config(_patch_example(tmp_path, mutate), registry_descriptors())
+    assert any("used by both" in e for e in excinfo.value.errors)
 
 
 def test_config_rejects_daqmx_without_device(tmp_path):

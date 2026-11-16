@@ -4,12 +4,12 @@
         "pico_1": {
             "name": "Pico 2 \u2014 all roles",
             "driver": "pico_serial_v1",
-            "firmware_version": "2.0",
+            "firmware_version": "2.5",
             "connection": {
                 "type": "serial",
                 "baud_rate": 115200
             },
-            "note": "Firmware PICO2DAQ 2.1. No port here: auto-connect opens /dev/atomiqa/pico_1, the udev rule (SYMLINK+=\"atomiqa/pico_1\") creates it. Pin map: GP14 reset, GP15 ramp trigger, GP16 event mode, GP17-19 capacitor bits, GP26 ADC (0-3.3 V).",
+            "note": "Firmware PICO2DAQ 2.5. No port here: auto-connect opens /dev/atomiqa/pico_1, the udev rule (SYMLINK+=\"atomiqa/pico_1\") creates it. Pin map: GP14 reset, GP15 ramp trigger, GP16 event mode, GP17-19 capacitor bits, GP26 ADC (0-3.3 V).",
             "capabilities": {
                 "timing": {
                     "integration_time_us": {

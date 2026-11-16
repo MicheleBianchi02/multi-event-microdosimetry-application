@@ -11,7 +11,7 @@ microseconds, all capacitances picofarad, all voltages volts.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 PinId = Union[int, str]
 TimingParameter = Union["ParameterBounds", "FixedValue", None]
@@ -155,12 +155,15 @@ class CircuitConfig:
 class ChannelConfig:
     id: str  # "ch1" or "ch2"
     circuit: str
+    # Physical input of the acquisition device this channel is wired to
+    # (instrument-specific, e.g. "AI6" on the NI USB-6451); None = the
+    # driver's bench-default terminal for the channel's termination.  The
+    # driver validates the value against its real inputs — a terminal it
+    # cannot wire is a load error.
     adc_input: Optional[str] = None
     # How the channel's signal reaches the acquisition device:
     # "differential" or "rse" (referenced single-ended).  None = the
-    # acquisition driver's default.  The concrete input terminals are
-    # hardware facts hardcoded in the driver (e.g. the NI USB-6451 maps
-    # ch1/ch2 x differential/rse to fixed AI pins).
+    # acquisition driver's default.
     termination: Optional[str] = None
     note: Optional[str] = None
 
@@ -209,8 +212,11 @@ class DriverDescriptor:
 
     Acquisition-side limits: `acq_max_channels` bounds the declared
     `num_channels`, `acq_max_rate_hz` the per-channel stream rate (the ramp
-    dt must satisfy 1/dt <= rate), and `channel_terminations` the channel
-    termination values the driver can actually wire.
+    dt must satisfy 1/dt <= rate), `channel_terminations` the channel
+    termination values the driver can actually wire, and
+    `channel_plan_validator` (a callable plan -> list of error strings)
+    checks the full channel plan — terminations plus optional `adc_input`
+    terminal overrides — against the driver's physical inputs.
     """
 
     capabilities: frozenset  # subset of {"timing", "gain", "acquisition"}
@@ -221,6 +227,7 @@ class DriverDescriptor:
     acq_max_channels: Optional[int] = None
     acq_max_rate_hz: Optional[float] = None
     channel_terminations: Optional[tuple] = None
+    channel_plan_validator: Optional[Callable] = None
 
     def supports(self, capability: str) -> bool:
         return capability in self.capabilities

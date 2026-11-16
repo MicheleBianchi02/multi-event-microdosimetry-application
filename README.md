@@ -54,8 +54,8 @@ hardware abstraction layer.
 | `models/` | Application state: `SessionModel` (configuration, metadata, signals) and `DataModel` (measurement arrays, online statistics) |
 | `views/` | PyQt6/pyqtgraph UI (wizard, running dashboard, offline import, workspace and calibration dialogs) |
 | `controllers/` | `SetupController` (wizard, connection, timing/gain configuration) and `MeasurementController` (measurement loop, save/load, results) |
-| `services/` | `HardwareService`, `DataExporter` (ZIP archives), `ShiftService` (workspace setup.json, crash recovery), `AnalysisService` (FFT, moving average, physics façade), multi-measurement analysis (`measurement_catalog` workspace scan, `variable_catalog`, `multi_analysis_service` pipeline) |
-| `core/` | Scientific algorithms: `calc_stat.py` (variance–covariance estimators + bootstrap), `bragg_peak.py` (FLUKA curves, integration-time planning), `load_file.py` (archive/legacy readers), `data_utils.py`, `constants.py` |
+| `services/` | `HardwareService`, `DataExporter` (ZIP archives), `ShiftService` (workspace setup.json, crash recovery), `AnalysisService` (FFT, moving average), multi-measurement analysis (`measurement_catalog` workspace scan, `variable_catalog`, `multi_analysis_service` pipeline) |
+| `core/` | Scientific algorithms: `calc_stat.py` (variance–covariance estimators + bootstrap), `bragg_peak.py` (integration-time planning), `load_file.py` (archive/legacy readers), `data_utils.py`, `constants.py` |
 | `hardware/` | Hardware abstraction: `interfaces/` (the abstract rules), `core/HardwareManager` (role routing), concrete drivers |
 
 ### 2.1 Hardware abstraction — configuration, registry, interfaces ("Rules")
@@ -143,9 +143,11 @@ section offers Import/Replace, **Edit…**, and **New from Components…**: the
 editor works on the validated model with live validation (it cannot save an
 invalid file); values fixed by the interface (driver, timing envelope, gain
 pins, ADC properties) are read-only there, while capacitor values, wiring,
-roles and channels are editable. New configurations are assembled from a
+roles, channels, names, notes, baud rates and firmware versions are editable.
+New configurations are assembled from a
 component library (`hardware_library/*.json` fragments: devices and circuits;
-"Save as Component…" extends it). The config file used for a run is embedded
+"Save as Component…" extends it, and saved fragments import back through
+"Add from Library…" / "Add from File…"). The config file used for a run is embedded
 verbatim in the measurement archive (§4.2), so every measurement carries its
 own provenance.
 
@@ -205,7 +207,7 @@ disabled with an explanatory tooltip.
 > The **NI driver** (`ni_daqmx_v1`, `hardware/ni/ni_daqmx.py`) acquires on a
 > NI USB-6451 (20-bit, 1 MS/s per channel simultaneous): every conversion
 > happens on a rising edge of the external **CONV_START** signal from the
-> timing device (PFI0, hardcoded), so "N = T_int/dt + 1 samples per
+> timing device (PFI2, hardcoded), so "N = T_int/dt + 1 samples per
 > integration window" is a hardware guarantee — the driver only makes sense
 > in `ramp`/`markers` mode and refuses to start without a `ramp_sink`.
 > Start ordering is an alignment guarantee: `start_measurement` arms the
@@ -217,18 +219,20 @@ disabled with an explanatory tooltip.
 > spec), reads use rate-adapted blocks with a bounded timeout, and stop
 > drains the DAQmx buffer before the task is stopped — no measurement rows
 > are stranded. The
-> config selects per channel only the *termination* (`differential` /
-> `rse`); the input terminals are fixed hardware facts hardcoded in the
-> driver (ch1 diff = AI0/AI8, ch2 diff = AI1/AI9, ch1 SE = AI2, ch2 SE =
-> AI3 — four different ADCs, so any mix is simultaneous). Readings outside
+> config selects per channel the *termination* (`differential` / `rse`)
+> and may override the physical terminal via the channel's `adc_input`
+> (e.g. `"AI6"`; validated at load); the defaults are fixed hardware facts
+> in the driver (ch1 diff = AI7/AI15, ch2 diff = AI1/AI9, ch1 SE = AI0,
+> ch2 SE = AI3 — one ADC per terminal, so any mix of distinct terminals is
+> simultaneous). Readings outside
 > the applied range simply clamp: railing at ±full scale is the overflow
 > indication. The DAQmx device name lives in the config
-> (`connection.device`, e.g. `NI6451`); the `nidaqmx` package is imported
+> (`connection.device`, e.g. `Dev1`); the `nidaqmx` package is imported
 > lazily so machines without it still load configs (the driver tests run
 > against a fake `nidaqmx` module; live validation needs the DAQmx runtime
 > and the card).
 
-> The Pico driver (`pico_serial_v1`) implements the **PICO2DAQ 2.1**
+> The Pico driver (`pico_serial_v1`) implements the **PICO2DAQ 2.5**
 > firmware protocol, documented in
 > [raspberry_copy/README.md](raspberry_copy/README.md) (commands, replies,
 > binary frame, end-of-stream marker, pin map, validated limits) — the same
@@ -236,8 +240,9 @@ disabled with an explanatory tooltip.
 > firmware sources; the firmware internals and the driver are described in
 > depth in [docs/PICO/FIRMWARE_AND_DRIVER.md](docs/PICO/FIRMWARE_AND_DRIVER.md).
 > Its `connect()` runs the `V` identity handshake as a liveness check (wrong
-> firmware or a system clock other than 150 MHz refuses the connection),
-> and its `calculate_actual_timing` mirrors the firmware's truncation of
+> firmware, a version older than 2.5 or a system clock other than 150 MHz
+> refuses the connection), and its `calculate_actual_timing` mirrors the
+> firmware's truncation of
 > the times to whole 150 MHz cycles. The PIC implementation still speaks
 > the legacy protocol; its firmware and driver are now documented in
 > [docs/PIC/README.md](docs/PIC/README.md) and
@@ -269,11 +274,17 @@ Four estimators are computed over the (ROI-filtered) data, each with uncertainti
   ȳ_D = (var − cov)/mean.
 - `var_autocov` — lag-1 autocovariance method: ȳ_D = (var − γ₁)/mean.
 - `var_doublecov` — cross-channel covariance method (two detectors only).
+  Every method with a covariance term also reports the dimensionless ratio
+  cov/var (γ₁/var for `var_autocov`) with a block-bootstrap uncertainty,
+  alongside cov/mean²; for `var_fft` the ratio is Covariance/Variance (the
+  non-white fraction) and its uncertainty is 0 (unknown, like the
+  covariance's).
 - `var_fft` — frequency-domain method, computed **only on explicit user
   request** from the *FFT Analysis…* dialog in the results panel (values stay
   zero otherwise): the white-noise floor of the one-sided PSD is measured as
   the mean over the frequency bins kept by the user — the shaded regions the
-  user draws mark the **excluded** bands, and the floor is measured on their
+  user draws (or re-enters manually, to repeat the same exclusion on every
+  measurement) mark the **excluded** bands, and the floor is measured on their
   complement (optionally clipped at a movable threshold line) —, the variance
   is the PSD integral over the *whole* spectrum (Parseval-exact, Welch
   included), the covariance is everything above the white floor (peaks,
@@ -282,7 +293,16 @@ Four estimators are computed over the (ROI-filtered) data, each with uncertainti
   exactly the spectrum the calculation integrates. Peaks above the threshold
   are listed per channel in ascending frequency; every peak starts
   **unchecked**, and only the ones the user identifies as real are archived.
-  Uncertainties are not implemented yet (0). The results are stored in
+  Uncertainties: mean and variance from the same circular block bootstrap as
+  the other estimators; ȳ_D (and the white variance) from the chi-square
+  statistics of the floor, σ = value·√(1/M) with M the number of frequency
+  bins kept for the floor (the one-sided spectrum sums only the
+  positive-frequency half, each bin carrying two degrees of freedom; with
+  nothing excluded M = N/2 and the result equals the variance method's
+  √(2/N); first approximation — threshold clipping and Welch's segment
+  averaging are ignored); the covariance uncertainty is not known and is
+  reported as 0. M itself is shown in the dialog next to N and
+  archived with the results. The results are stored in
   `analysis.results` of the archive and the
   dialog parameters (excluded bands, thresholds, method, window, nperseg)
   plus a floor/peaks diagnostic snapshot in `analysis.fft`.
@@ -421,7 +441,11 @@ Each measurement is a self-contained ZIP with four members:
   `acquisition_mode`, `is_problematic` flag), `experimental_setup` (facility, beam type/energy/current,
   depth, detector voltage, calibration, notes), `hardware_settings` — a frozen
   snapshot of the hardware: ADC bits and applied input range, per-channel applied
-  `gpio_mask` and total `capacitance_pF`, the resolved hardware summary and the
+  `gpio_mask` and total `capacitance_pF` (in *Edit Info* the applied gain
+  can be re-picked from the loaded config's gain table — for archives
+  measured before the gain was recorded — and the consistent mask +
+  capacitance pair is persisted on the next save), the
+  resolved hardware summary and the
   config sha256 — `timing_settings` (integration/reset/period/
   sample frequency), `analysis` (ROIs, bootstrap metadata, results of all five
   estimators, and — when the user ran the FFT analysis — the `fft` block with
@@ -492,7 +516,42 @@ never silently misaligned. Crash recovery trims each file to its last whole
 window at the watermark (`recover_ramp_file`, wired into the workspace
 recovery flow).
 
-The custom monitoring/FFT UI for these files is future work (§6).
+The custom monitoring/FFT UI lives in the standalone `--ramp` tool (§7);
+integration into the running window is future work (§6).
+
+### 4.5 Live ramp analysis (results-only mode)
+
+For spectral campaigns with long ramps (seconds per window) recording every
+sample is wasteful: the **Live Ramp Analysis…** button on the timing window
+(enabled once the timing is applied with ramp sampling) opens a mode where
+ramps stream *through* memory — one window per channel assembled at a time —
+and only results are kept (`LiveRampSink`, `services/live_ramp.py`):
+
+- **Spectrum**: the FFT of a user-selected time segment of each ramp
+  `[t0, t1]` (move `t0` past the start-of-ramp transient), rms/dBV
+  convention identical to the oscilloscope and `--ramp` spectrum
+  (ms = 2·(|X|/n′)², DC/Nyquist dropped, power-averaged over windows).
+  Optional **high-pass** (2nd-order Butterworth, user-set fc): the ramp
+  slope's 1/f² Fourier tail buries the parallel-current noise at every
+  frequency (both are 1/f² through the integrator; their ratio is fixed by
+  I_dc/i_n), so the plain ramp FFT cannot show it — the filter removes the
+  linear trend (1st order would not) and exposes the noise's 1/f region
+  between fc and the white voltage floor.  The filter is
+  reflection-padded (~one period of fc) so its transient is settled at any
+  fc; changing it restarts the averaging and the fc is recorded in the
+  export header.  The preview and the CDS path are never filtered.
+- **CDS**: single samples at chosen times `t_start`/`t_stop` per ramp; the
+  `stop − start` series gets mean/std/variance/min/max and a histogram.
+- **Reset** restarts the averaging; changing the selection restarts it too
+  (an average is only meaningful under one selection). Stop/Start keeps
+  the results (Pause semantics). **Export…** writes per-channel
+  `<base>_chN_spectrum.csv` / `<base>_chN_cds.csv` with the full timing
+  header — nothing is written to the workspace automatically.
+
+The acquisition path is the normal ramp run (arm → 3 s → timing start →
+NI reader → sink), so the Pico and the hardware flow are untouched; the
+mode is mutually exclusive with a normal measurement (`HardwareService.
+is_receiving` guards both directions).
 
 ## 5. Intended behaviour vs. current code — biggest differences
 
@@ -513,7 +572,7 @@ severities in [BUG.md](BUG.md)):
   `simulation_*` driver code, so simulation runs through the same config/roles
   path as real hardware.
 - **NI (or other) acquisition driver**: *implemented* — `ni_daqmx_v1`
-  (USB-6451: external CONV_START sample clock on PFI0, fixed input terminals
+  (USB-6451: external CONV_START sample clock on PFI2, fixed input terminals
   keyed by the channel `termination`, ±0.2/±2.5/±5/±10 V ranges, 20-bit
   counts streamed into the ramp sink; ramp dt validated against the 1 MS/s
   per-channel limit at Apply Configuration). Tested against a fake
@@ -524,13 +583,17 @@ severities in [BUG.md](BUG.md)):
 - **Ramp sampling acquisition**: *app side done* — the AQR1 streaming storage
   (§4.4), the window extraction feeding the classic pipeline, the simulated
   ramp source, save/crash-recovery and the `ramp_sink` interface exist and are
-  tested, and the NI driver streams into the sink (see above). Still open:
-  validation with real hardware, and the monitoring/FFT UI reading the files
-  via `np.memmap`.
-- **Device identity check**: *liveness done* — the PICO2DAQ 2.1 firmware's
+  tested, and the NI driver streams into the sink (see above). The
+  monitoring/FFT UI exists as the standalone `--ramp` tool (§7): gap-aware
+  window browser with overlays and mean±1σ band, derivatives (consecutive
+  difference or moving linear fit), and the ensemble-averaged FFT with the
+  across-window spread. Still open: validation with real hardware, and the
+  in-app integration of that analysis.
+- **Device identity check**: *liveness done* — the PICO2DAQ 2.5 firmware's
   `V` handshake returns a unique per-board id and the driver verifies
-  firmware + clock on every connect (wrong board or bare Pico refuses the
-  connection). Still open: matching the board id against the hardware
+  firmware + version + clock on every connect (wrong board, old firmware
+  or bare Pico refuses the connection). Still open: matching the board id
+  against the hardware
   config (per-board entries) so auto-connect confirms it opened exactly the
   configured board and the manual dialog can suggest mappings.
 - **Debug-only run path**: the application always acquires in debug mode (start/stop
@@ -552,17 +615,28 @@ severities in [BUG.md](BUG.md)):
   described in depth under [docs/](docs/) (PICO, PIC, NI). The PIC still
   speaks the legacy protocol; `microcontroller_api.md` /
   `daq_architecture.txt` are outdated and should not be relied upon.
-- **FFT analysis uncertainties**: the `var_fft` estimator currently reports 0
-  for its uncertainties; a bootstrap or propagation scheme is future work.
+- **FFT analysis uncertainties**: *done* — mean and variance carry the same
+  circular block bootstrap uncertainties as the other estimators; ȳ_D (and
+  the white variance) carries the floor's chi-square uncertainty
+  value·√(1/M), with M the number of frequency bins kept for the floor
+  (each one-sided bin has two degrees of freedom, so with no exclusions
+  M = N/2 and the uncertainty matches the variance method's √(2/N); a
+  first approximation that ignores threshold clipping and Welch's segment
+  averaging); the covariance uncertainty is unknown and reported as 0. M is
+  displayed and archived next to N.
 
 ## 7. Running and building
 
 ```bash
 python app.py [-s | --simulate] [-b | --baud-rate N] [-c | --single-channel] [--debug]
+python app.py --ramp [PATH]   # standalone ramp-sampling analysis (§4.4 files):
+                              # PATH = workspace | measurement ZIP | ramp folder
 python build.py          # PyInstaller bundle
 sudo ./setup_udev_rules.sh   # persistent device names: /dev/atomiqa/<device_id>
                              # how to write the rules by hand: UDEV_RULES.md
 ```
 
-Dependencies: see `pyproject.toml` (PyQt6, pyqtgraph, numpy, pandas, pyserial,
-arch, statsmodels).
+Dependencies: see `pyproject.toml` (PyQt6, pyqtgraph, numpy, pandas, scipy,
+pyserial, arch, statsmodels, nidaqmx — the Python half of the NI USB-6451
+driver; the NI-DAQmx runtime itself is installed separately on the
+measurement PC).

@@ -209,7 +209,13 @@ def _prune_channel_wiring(config: dict, channel: str) -> None:
     ]
 
 
-def set_channel(config: dict, channel: str, circuit_id: Optional[str], adc_input: Optional[str] = None) -> None:
+def set_channel(
+    config: dict,
+    channel: str,
+    circuit_id: Optional[str],
+    adc_input: Optional[str] = None,
+    termination: Optional[str] = None,
+) -> None:
     """Declare a channel.  circuit_id None removes the channel (and clears its
     gain role); the empty string declares it as *not yet assigned* — the
     validator then reports the missing circuit until one is chosen."""
@@ -227,6 +233,10 @@ def set_channel(config: dict, channel: str, circuit_id: Optional[str], adc_input
         entry["adc_input"] = adc_input
     else:
         entry.pop("adc_input", None)
+    if termination:
+        entry["termination"] = termination
+    else:
+        entry.pop("termination", None)
     if old_circuit and old_circuit != circuit_id:
         # the channel moved to another circuit: its old wiring is stale
         config["connections"][:] = [

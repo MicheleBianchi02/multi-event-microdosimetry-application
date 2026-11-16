@@ -388,8 +388,13 @@ class _BlockSinkBase:
     def write_block(self, channel: int, samples, abs_index: Optional[int] = None) -> None:
         """Append one block of uint32 samples of `channel`.  `abs_index` is
         the absolute sample index of the block's first sample (None =
-        continues contiguously after the previous block); a jump enqueues a
-        gap so window alignment never silently shifts."""
+        continues contiguously after the previous block); a forward jump
+        enqueues a gap so window alignment never silently shifts, and a
+        BACKWARD jump enqueues a "restart" (the stream re-anchored — e.g.
+        a sink reused across stop/start while the driver's counters began
+        a new run at 0: any partially assembled window is stale and must
+        be dropped, or the fill counter skips the exact N boundary and
+        assembly silently wedges)."""
         if self._closed:
             raise RuntimeError("ramp sink is closed")
         arr = np.ascontiguousarray(samples, dtype=SAMPLE_DTYPE)
@@ -400,6 +405,8 @@ class _BlockSinkBase:
             abs_index = expected
         if abs_index > expected:
             self._enqueue_gap(channel, expected, abs_index - expected)
+        elif abs_index < expected:
+            self._enqueue_restart(channel)
         self._expected[channel] = abs_index + arr.size
         item = ("block", channel, arr, abs_index)
         try:
@@ -411,6 +418,19 @@ class _BlockSinkBase:
             self._dropped_blocks[channel] += 1
             self._enqueue_gap(channel, abs_index, arr.size)
             self._expected[channel] = abs_index  # next block reports its own index
+
+    def _enqueue_restart(self, channel: int) -> None:
+        """Stream re-anchored backwards: sinks that keep state across runs
+        must drop their partial window (handled in each sink's worker;
+        unknown item kinds are ignored by the per-run sinks, which never
+        see a backward jump)."""
+        try:
+            self._queue.put(("restart", channel))
+        except queue.Full:
+            # must never block the driver.  Losing this item leaves the
+            # stale partial in place (assembly may wedge); a full queue
+            # here means the sink thread is already not draining.
+            self._dropped_blocks[channel] += 1
 
     def report_gap(self, channel: int, abs_index: int, missing: int) -> None:
         """The driver detected a hole in `channel`'s stream (e.g. a transport

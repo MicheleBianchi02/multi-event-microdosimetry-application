@@ -3,6 +3,7 @@ Tests for the config-driven udev rule generator (pure parts + fake sysfs).
 """
 import importlib.util
 import os
+import sys
 
 import pytest
 
@@ -35,6 +36,10 @@ def test_rule_without_serial_falls_back_to_vid_pid():
     assert rule == 'SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", SYMLINK+="atomiqa/x"'
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="fakes sysfs layout and symlinks: the udev workflow is Linux-only",
+)
 def test_usb_enumeration_over_fake_sysfs(tmp_path, monkeypatch):
     # /sys/class/tty/ttyACM0 -> ../../devices/.../2-1:1.0/ttyUSB...-ttyACM0
     usb_root = tmp_path / "devices" / "usb1" / "2-1"
